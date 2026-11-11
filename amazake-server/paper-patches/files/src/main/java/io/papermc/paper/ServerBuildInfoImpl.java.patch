@@ -1,0 +1,11 @@
+--- a/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java
++++ b/src/main/java/io/papermc/paper/ServerBuildInfoImpl.java
+@@ -61,7 +61,7 @@
+ 
+     @Override
+     public boolean isBrandCompatible(final @NotNull Key brandId) {
+-        return brandId.equals(this.brandId);
++        return brandId.equals(this.brandId) || brandId.equals(ServerBuildInfo.BRAND_PAPER_ID); // Amazake - a Paper fork: plugins asking for Paper get yes
+     }
+ 
+     @Override
