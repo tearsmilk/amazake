@@ -32,6 +32,17 @@ public final class AmazakeConfig {
 
     // --- Settings: each multithreaded feature adds its switch here, read in reload() ----------
 
+    /** Profiler site to upload /amazake profile reports to; empty = save them to profiles/ only. */
+    public static String profilerUploadUrl = "";
+    /** Sent as X-Amazake-Token when the site requires a token; empty = no header. */
+    public static String profilerUploadToken = "";
+    /** Length of /amazake profile without an argument, seconds. */
+    public static int profilerDefaultSeconds = 30;
+    /** Longest measurement allowed, seconds. */
+    public static int profilerMaxSeconds = 600;
+    /** Time between two samples, milliseconds (at least 250). */
+    public static int profilerIntervalMs = 1000;
+
     private AmazakeConfig() {
     }
 
@@ -67,6 +78,19 @@ public final class AmazakeConfig {
         // Settings are read here, e.g.:
         //   asyncEntityTracker = bool("async.entity-tracker", true, "Track entities off the main thread.");
 
+        profilerUploadUrl = string("profiler.upload-url", "",
+            "Адрес вашего сайта профайлера, например https://profiler.example.com",
+            "/amazake profile отправляет туда отчёт и присылает ссылку на него.",
+            "Пусто: отчёты только сохраняются в папку profiles/.").trim();
+        profilerUploadToken = string("profiler.upload-token", "",
+            "Токен, если сайт его требует (заголовок X-Amazake-Token). Пусто: без токена.").trim();
+        profilerMaxSeconds = Math.max(1, integer("profiler.max-seconds", 600,
+            "Самый долгий замер /amazake profile, в секундах."));
+        profilerDefaultSeconds = Math.min(profilerMaxSeconds, Math.max(1, integer("profiler.default-seconds", 30,
+            "Длина замера /amazake profile без аргумента, в секундах.")));
+        profilerIntervalMs = Math.max(250, integer("profiler.interval-ms", 1000,
+            "Интервал между замерами, в миллисекундах (не меньше 250)."));
+
         try {
             yaml.save(file);
         } catch (final IOException e) {
@@ -90,6 +114,14 @@ public final class AmazakeConfig {
         }
         yaml.setComments(path, List.of(comment));
         return yaml.getInt(path, def);
+    }
+
+    private static String string(final String path, final String def, final String... comment) {
+        if (!yaml.isString(path)) {
+            yaml.set(path, def);
+        }
+        yaml.setComments(path, List.of(comment));
+        return yaml.getString(path, def);
     }
 
     public static File file() {

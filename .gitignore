@@ -21,3 +21,7 @@ paper-server
 
 # Test server
 run
+
+# Python
+__pycache__/
+*.pyc

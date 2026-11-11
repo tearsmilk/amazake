@@ -1,0 +1,59 @@
+# managed by amazake-web installer (web/deploy/install.sh). Do not edit: re-running install.sh overwrites it.
+# This is a template: install.sh fills in the Python path, port and folders.
+#
+# The limits below exist so that this site can never take CPU, memory or disk I/O away from other
+# programs on the same VPS (for example a Discord bot): it runs at low priority, is capped at half a
+# core and 256 MiB, and is the first candidate for the OOM killer instead of anything else.
+
+[Unit]
+Description=Amazake profiler site
+Documentation=https://github.com/tearsmilk/amazake/tree/main/web
+After=network.target
+
+[Service]
+Type=simple
+User=amazake-web
+Group=amazake-web
+EnvironmentFile=@ENV_FILE@
+WorkingDirectory=@DATA_DIR@
+ExecStart=@PYTHON@ @APP_DIR@/server/amazake_web.py --host 127.0.0.1 --port @PORT@ --data-dir @DATA_DIR@ --static-dir @APP_DIR@/static
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+UMask=0027
+
+# Resource limits: never starve neighbours.
+MemoryHigh=200M
+MemoryMax=256M
+CPUQuota=50%
+CPUWeight=20
+IOWeight=10
+Nice=10
+IOSchedulingClass=idle
+TasksMax=64
+LimitNOFILE=4096
+OOMScoreAdjust=500
+
+# Sandbox.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=@DATA_DIR@
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
