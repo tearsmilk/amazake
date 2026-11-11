@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="branding/lockup-light.svg">
+    <img src="branding/lockup.svg" alt="Amazake" width="420">
+  </picture>
+</p>
+
 # Amazake
 
 Серверное ядро Minecraft **1.21.11**: форк [Paper](https://github.com/PaperMC/Paper). Цель — многопоточное, быстрое и удобное ядро для любых серверов: работают обычные плагины Paper, а каждая многопоточная фича включается переключателем в `amazake.yml`.
