@@ -37,7 +37,9 @@ ID_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 ID_LENGTH = 10
 ID_RE = re.compile(r"^[A-Za-z0-9]{%d}$" % ID_LENGTH)
 REPORT_PATH_RE = re.compile(r"^/api/reports/([A-Za-z0-9]{%d})$" % ID_LENGTH)
-VIEWER_PATH_RE = re.compile(r"^/r/([A-Za-z0-9]{%d})$" % ID_LENGTH)
+# Any /r/<something> gets the viewer page (always the same static index.html), which shows
+# «Неверная ссылка» for an id that is not one, instead of the API's bare JSON 404.
+VIEWER_PATH_RE = re.compile(r"^/r/[^/]{0,200}/?$")
 REPORT_FILE_RE = re.compile(r"^[A-Za-z0-9]{%d}\.json\.gz$" % ID_LENGTH)
 HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(:[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+\](:[0-9]{1,5})?$")
 

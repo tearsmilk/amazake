@@ -3,23 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark light">
-  <title>Amazake Профайлер</title>
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0d1117">
+  <title>Amazake profiler</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <a class="brand" href="/">
-      <img src="/favicon.svg" alt="" width="24" height="24">
-      <span>Amazake <span class="brand-sub">профайлер</span></span>
-    </a>
-    <nav class="topbar-nav" id="topnav" hidden></nav>
+  <header class="shell-head">
+    <div class="topbar">
+      <a class="brand" href="/" aria-label="Amazake profiler — на главную">
+        <img src="/favicon.svg" alt="" width="28" height="28">
+        <span class="brand-name">Amazake</span><span class="brand-sub">profiler</span>
+      </a>
+      <div class="topbar-meta" id="meta" hidden></div>
+      <div class="topbar-end">
+        <div class="topbar-actions" id="actions" hidden></div>
+        <button class="btn btn-small btn-icon theme-toggle" id="theme-toggle" type="button" aria-label="Светлая тема" title="Светлая тема"></button>
+      </div>
+    </div>
+    <div class="tabs" id="tabs" hidden>
+      <div class="tabs-inner" role="tablist" aria-label="Разделы отчёта"></div>
+    </div>
   </header>
   <main id="app" class="app">
     <noscript><p class="notice">Для просмотра отчёта включите JavaScript.</p></noscript>
   </main>
   <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

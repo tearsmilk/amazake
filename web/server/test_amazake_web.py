@@ -295,7 +295,13 @@ class ApiTests(unittest.TestCase):
             self.assertIn("frame-ancestors 'none'", headers["content-security-policy"])
             self.assertEqual(headers["content-security-policy"], aw.CSP)
             self.assert_common_headers(headers)
-        status, _, _ = self.h.request("GET", "/r/bad")
+        # A malformed id still gets the viewer page (it shows «Неверная ссылка»), never the API's JSON.
+        for path in ("/r/bad", "/r/aB3xY9kQ2", "/r/", "/r/%3Cscript%3E"):
+            status, headers, body = self.h.request("GET", path)
+            self.assertEqual((status, body), (200, INDEX_HTML), path)
+            self.assertEqual(headers["content-security-policy"], aw.CSP)
+        # Deeper paths are not the viewer.
+        status, _, _ = self.h.request("GET", "/r/aB3xY9kQ2m/../../etc/passwd")
         self.assertEqual(status, 404)
 
     def test_static_files(self):

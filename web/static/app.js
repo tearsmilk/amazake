@@ -52,7 +52,10 @@
   };
 
   const app = document.getElementById('app');
-  const topnav = document.getElementById('topnav');
+  const metaBar = document.getElementById('meta');
+  const actionsBar = document.getElementById('actions');
+  const tabsBar = document.getElementById('tabs');
+  const toast = document.getElementById('toast');
   const tip = document.getElementById('tooltip');
 
   /** Chart redraw callbacks for the current view (re-run on resize). */
@@ -102,11 +105,33 @@
     return node;
   }
 
+  let gradSeq = 0;
+
+  /** Vertical fade for area fills; colour can be a CSS var, so it goes through style. */
+  function gradientFill(root, color, top) {
+    let defs = root.querySelector('defs');
+    if (!defs) { defs = svg('defs'); root.insertBefore(defs, root.firstChild); }
+    const id = 'amz-grad-' + (++gradSeq);
+    const g = svg('linearGradient', { id: id, x1: 0, x2: 0, y1: 0, y2: 1 });
+    const s0 = svg('stop', { offset: '0%' });
+    s0.style.stopColor = color; s0.style.stopOpacity = String(top);
+    const s1 = svg('stop', { offset: '100%' });
+    s1.style.stopColor = color; s1.style.stopOpacity = '0';
+    g.append(s0, s1);
+    defs.appendChild(g);
+    return 'url(#' + id + ')';
+  }
+
   function isObj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
   function num(v, d) { return typeof v === 'number' && isFinite(v) ? v : (d === undefined ? 0 : d); }
   function numOrNull(v) { return typeof v === 'number' && isFinite(v) ? v : null; }
-  function str(v, d) {
-    if (typeof v === 'string') return v;
+  // Report strings are cut to a sane length: a multi-megabyte name without spaces
+  // would make the browser's line breaking stall the tab for minutes.
+  const STR_MAX = 512;
+  const ARG_MAX = 4096;
+  function cut(s, max) { return s.length > max ? s.slice(0, max - 1) + '…' : s; }
+  function str(v, d, max) {
+    if (typeof v === 'string') return cut(v, max || STR_MAX);
     if (typeof v === 'number' || typeof v === 'boolean') return String(v);
     return d === undefined ? '' : d;
   }
@@ -298,7 +323,7 @@
         minecraftVersion: str(server.minecraftVersion, ''),
         javaVersion: str(server.javaVersion, ''),
         javaVendor: str(server.javaVendor, ''),
-        jvmArgs: arr(server.jvmArgs).map((a) => str(a, '')).filter((a) => a !== ''),
+        jvmArgs: arr(server.jvmArgs).map((a) => str(a, '', ARG_MAX)).filter((a) => a !== ''),
         onlinePlayers: numOrNull(server.onlinePlayers),
         maxPlayers: numOrNull(server.maxPlayers),
         plugins: arr(server.plugins).filter(isObj).map((p) => ({
@@ -516,9 +541,23 @@
       if (!(yMax > 0)) yMax = 1;
     }
     const scale = o.yScale || 1;
-    let ticks = niceTicks(yMax / scale, Math.max(2, Math.floor(H / 48))).map((v) => v * scale);
-    if (o.fixedMax) ticks = ticks.filter((v) => v <= o.fixedMax + 1e-9);
-    else yMax = ticks[ticks.length - 1];
+    let yMin = 0;
+    let ticks;
+    if (o.yMin > 0 && o.yMin < yMax) {
+      // Axis that does not start at zero (TPS): ticks from a rounded floor up to yMax.
+      const step = niceStep((yMax - o.yMin) / Math.max(2, Math.floor(H / 48)));
+      yMin = Math.floor(o.yMin / step + 1e-9) * step;
+      ticks = [];
+      for (let k = 0; k < 50; k++) {
+        const v = Math.round((yMin + k * step) / step) * step;
+        if (v > yMax + 1e-9) break;
+        ticks.push(v);
+      }
+    } else {
+      ticks = niceTicks(yMax / scale, Math.max(2, Math.floor(H / 48))).map((v) => v * scale);
+      if (o.fixedMax) ticks = ticks.filter((v) => v <= o.fixedMax + 1e-9);
+      else yMax = ticks[ticks.length - 1];
+    }
     const yFmt = o.yFmt || ((v) => fmtNum(v, 1));
     const yLabels = ticks.map(yFmt);
     const ml = Math.max(...yLabels.map((s) => s.length)) * 6.6 + 12;
@@ -532,7 +571,7 @@
     const d1 = n > 1 ? t1 + pad : t0 + R.interval / 2;
     const X = (i) => ml + (R.t[i] - d0) / (d1 - d0) * pw;
     const XT = (t) => ml + (t - d0) / (d1 - d0) * pw;
-    const Y = (v) => mt + ph - clamp(v / yMax, 0, 1.02) * ph;
+    const Y = (v) => mt + ph - clamp((v - yMin) / (yMax - yMin), 0, 1.02) * ph;
 
     const root = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, width: W, height: H, role: 'img' });
     if (o.ariaLabel) root.setAttribute('aria-label', o.ariaLabel);
@@ -599,6 +638,11 @@
           d += (open ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(v).toFixed(1);
           open = true;
         }
+        if (d && s.area && n > 1 && s.values.every((v) => v !== null)) {
+          const a = svg('path', { d: d + 'L' + X(n - 1).toFixed(1) + ',' + (mt + ph) + 'L' + X(0).toFixed(1) + ',' + (mt + ph) + 'Z', class: 'area-fill' });
+          a.style.fill = gradientFill(root, s.color, 0.32);
+          marks.insertBefore(a, marks.firstChild);
+        }
         if (d) {
           const p = svg('path', { d: d, fill: 'none', 'stroke-width': s.width || 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
           p.style.stroke = s.color;
@@ -610,14 +654,18 @@
 
     // reference lines
     for (const r of o.refs || []) {
-      if (!(r.y > 0) || r.y > yMax) continue;
+      if (!(r.y > 0) || r.y > yMax || r.y < yMin) continue;
       const y = Y(r.y);
       const line = svg('line', { x1: ml, x2: ml + pw, y1: y, y2: y, 'stroke-dasharray': '6 4', 'stroke-width': r.strong ? 1.5 : 1 });
       line.style.stroke = r.strong ? 'var(--ref-strong)' : 'var(--ref)';
       root.appendChild(line);
       if (r.label) {
-        const label = svg('text', { x: ml + pw - 4, y: y - 5, 'text-anchor': 'end', class: 'ref-label', text: r.label });
-        root.appendChild(label);
+        // Label on a surface-coloured pill so it stays legible over filled areas.
+        const tw = r.label.length * 6.2 + 12;
+        const below = y - 18 < mt;
+        const by = below ? y + 3 : y - 18;
+        root.appendChild(svg('rect', { x: ml + pw - tw, y: by, width: tw, height: 15, rx: 4, class: 'ref-bg' }));
+        root.appendChild(svg('text', { x: ml + pw - 6, y: by + 11, 'text-anchor': 'end', class: 'ref-label', text: r.label }));
       }
     }
 
@@ -798,7 +846,7 @@
   // Sparkline (threads table)
   // ---------------------------------------------------------------------
 
-  function sparkline(R, values, name) {
+  function sparkline(R, values, name, color) {
     const W = 120, H = 26;
     const n = values.length;
     const box = el('span', { class: 'spark' });
@@ -814,9 +862,15 @@
       open = true;
     }
     if (n > 1 && d && values.every((v) => v !== null)) {
-      root.appendChild(svg('path', { d: d + 'L' + X(n - 1).toFixed(1) + ',' + (H - 1) + 'L' + X(0).toFixed(1) + ',' + (H - 1) + 'Z', class: 'spark-area' }));
+      const a = svg('path', { d: d + 'L' + X(n - 1).toFixed(1) + ',' + (H - 1) + 'L' + X(0).toFixed(1) + ',' + (H - 1) + 'Z', class: 'spark-area' });
+      if (color) a.style.fill = color;
+      root.appendChild(a);
     }
-    if (d) root.appendChild(svg('path', { d: d, class: 'spark-line' }));
+    if (d) {
+      const l = svg('path', { d: d, class: 'spark-line' });
+      if (color) l.style.stroke = color;
+      root.appendChild(l);
+    }
     const cross = svg('line', { y1: 0, y2: H, class: 'crosshair', visibility: 'hidden' });
     cross.style.stroke = 'var(--ink-2)';
     root.appendChild(cross);
@@ -1106,370 +1160,208 @@
   }
 
   // ---------------------------------------------------------------------
-  // Report sections
+  // Icons (stroke icons on a 24×24 grid, built with createElementNS)
   // ---------------------------------------------------------------------
 
-  function card(id, title, desc, body) {
-    return el('section', { class: 'card', id: id || null }, [
-      el('h2', { text: title }),
-      desc ? el('p', { class: 'card-desc', text: desc }) : null,
-    ].concat(body));
+  const ICONS = {
+    link: ['M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5', 'M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5'],
+    download: ['M12 3v12', 'M7 10l5 5 5-5', 'M4 20h16'],
+    check: ['M5 12.5l4.5 4.5L19 7.5'],
+    good: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M8 12.5l2.7 2.7L16.5 9.5'],
+    warning: ['M10.3 3.9L2.4 17.6A2 2 0 0 0 4.1 20.6h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z', 'M12 9v4.5', 'M12 17.2v.1'],
+    serious: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 7.5v5.5', 'M12 16.4v.1'],
+    critical: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M9 9l6 6', 'M15 9l-6 6'],
+    info: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 11v5.5', 'M12 7.6v.1'],
+    chevron: ['M9 6l6 6-6 6'],
+    search: ['M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14z', 'M20 20l-4-4'],
+    upload: ['M12 16V4', 'M7 9l5-5 5 5', 'M4 20h16'],
+    file: ['M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z', 'M14 3v5h5'],
+    arrow: ['M5 12h14', 'M13 6l6 6-6 6'],
+    back: ['M19 12H5', 'M11 6l-6 6 6 6'],
+    clock: ['M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z', 'M12 7v5l3 2'],
+    users: ['M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', 'M2 21v-1a6 6 0 0 1 6-6h2a6 6 0 0 1 6 6v1', 'M16 3.1a4 4 0 0 1 0 7.8', 'M22 21v-1a6 6 0 0 0-4-5.6'],
+    calendar: ['M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z', 'M3 10h18', 'M8 3v4', 'M16 3v4'],
+    server: ['M4 4h16v6H4z', 'M4 14h16v6H4z', 'M8 7h.01', 'M8 17h.01'],
+    sun: ['M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', 'M12 2v2', 'M12 20v2', 'M4.9 4.9l1.4 1.4', 'M17.7 17.7l1.4 1.4', 'M2 12h2', 'M20 12h2', 'M4.9 19.1l1.4-1.4', 'M17.7 6.3l1.4-1.4'],
+    moon: ['M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z'],
+  };
+
+  function icon(name, cls) {
+    const root = svg('svg', { viewBox: '0 0 24 24', width: 16, height: 16, 'aria-hidden': 'true', focusable: 'false', class: 'icon' + (cls ? ' ' + cls : '') });
+    for (const d of ICONS[name] || []) root.appendChild(svg('path', { d: d }));
+    return root;
   }
 
-  function fact(label, value) {
-    return el('div', { class: 'fact' }, [el('div', { class: 'fact-label', text: label }), el('div', { class: 'fact-value', text: value || '—' })]);
-  }
+  // ---------------------------------------------------------------------
+  // Status colours for widgets
+  // ---------------------------------------------------------------------
 
-  function sectionHeader(R) {
-    const s = R.server, sys = R.system;
-    const title = (s.brand + ' ' + s.version).trim();
-    const head = el('div', { class: 'report-head' }, [
-      el('div', null, [
-        el('h1', { text: title || 'Отчёт профайлера' }),
-        el('p', { class: 'sub', text: 'Отчёт профайлера' + (R.start ? ' от ' + fmtDateTime(R.start) : '') }),
-      ]),
-    ]);
-    const players = s.onlinePlayers === null ? '—' : fmtNum(s.onlinePlayers) + (s.maxPlayers !== null ? ' из ' + fmtNum(s.maxPlayers) : '');
-    const java = [s.javaVersion, s.javaVendor].filter(Boolean).join(', ');
-    const os = [sys.os, sys.arch].filter(Boolean).join(', ');
-    const heap = sys.heapMaxBytes === null ? '—' :
-      fmtBytes(sys.heapMaxBytes) + (sys.totalMemoryBytes ? ' (ОЗУ ' + fmtBytes(sys.totalMemoryBytes) + ')' : '');
-    const facts = el('div', { class: 'facts' }, [
-      fact('Сервер', title),
-      fact('Minecraft', s.minecraftVersion),
-      fact('Начало замера', R.start ? fmtDateTime(R.start) : 'неизвестно'),
-      fact('Длительность', fmtDuration(R.durationMs) + ' · ' + R.n + ' ' + plural(R.n, ['замер', 'замера', 'замеров'])),
-      fact('Игроки', players),
-      fact('Ядра', fmtNum(sys.logicalCores) + ' ' + plural(sys.logicalCores, ['логическое', 'логических', 'логических'])),
-      fact('Процессор', sys.cpuModel || 'неизвестно'),
-      fact('Java', java),
-      fact('ОС', os),
-      fact('Куча (максимум)', heap),
-    ]);
-    return [head, facts];
-  }
+  const STATUS = {
+    good: { label: 'Норма', icon: 'good' },
+    warn: { label: 'Внимание', icon: 'warning' },
+    bad: { label: 'Плохо', icon: 'critical' },
+  };
 
-  function sectionFindings(R) {
-    const list = el('ul', { class: 'findings' });
-    for (const f of computeFindings(R)) {
-      list.appendChild(el('li', { class: 'finding sev-' + f.severity }, [
-        el('span', { class: 'badge sev-' + f.severity, text: SEVERITY[f.severity].label }),
-        el('p', { class: 'finding-title', text: f.title }),
-        el('p', { class: 'finding-text', text: f.text }),
-      ]));
+  /** lower-is-better: value <= a → good, <= b → warn, else bad. */
+  function statusLow(v, a, b) { return v === null || v === undefined || !isFinite(v) ? null : v <= a ? 'good' : v <= b ? 'warn' : 'bad'; }
+  /** higher-is-better: value >= a → good, >= b → warn, else bad. */
+  function statusHigh(v, a, b) { return v === null || v === undefined || !isFinite(v) ? null : v >= a ? 'good' : v >= b ? 'warn' : 'bad'; }
+
+  function statusVar(st) { return st === 'good' ? 'var(--good)' : st === 'warn' ? 'var(--warning)' : st === 'bad' ? 'var(--critical)' : 'var(--accent)'; }
+
+  // ---------------------------------------------------------------------
+  // Mini sparkline for the stat widgets (scales with CSS, no redraw needed)
+  // ---------------------------------------------------------------------
+
+  const MINI_POINTS = 240;
+
+  function miniSpark(R, values, opts) {
+    const box = el('div', { class: 'w-spark' });
+    const n = values ? values.length : 0;
+    if (!n || values.every((v) => v === null)) return box;
+    const W = 240, H = 44;
+    // Long reports: average into at most MINI_POINTS buckets.
+    const b = Math.min(n, MINI_POINTS);
+    const pts = new Array(b);
+    for (let k = 0; k < b; k++) {
+      const i0 = Math.floor(k * n / b), i1 = Math.max(i0 + 1, Math.floor((k + 1) * n / b));
+      let s = 0, c = 0;
+      for (let i = i0; i < i1; i++) if (values[i] !== null) { s += values[i]; c++; }
+      pts[k] = c ? s / c : null;
     }
-    return card('findings', 'Выводы', 'Автоматические подсказки по этому замеру. Это правила, а не приговор: сверяйтесь с графиками ниже.', [list]);
-  }
-
-  function sectionCores(R) {
-    const C = R.system.logicalCores;
-    const body = [];
-    if (R.system.perCore && R.n) {
-      body.push(heatmap(R), heatLegend());
-      const avg = coreAverages(R);
-      const bars = el('div', { class: 'core-bars' });
-      avg.forEach((v, k) => {
-        bars.appendChild(el('div', { class: 'core-bar' }, [
-          el('span', { class: 'name', text: 'ядро ' + k }), meter(v, v >= 0.7), el('span', { class: 'val', text: fmtPct(v) }),
-        ]));
-      });
-      body.push(el('h3', { text: 'Средняя загрузка каждого ядра' }), bars);
-    } else {
-      body.push(el('p', { class: 'notice', text: R.n ? 'Загрузка по отдельным ядрам недоступна: сервер собирает её только на Linux (/proc/stat).' : 'В отчёте нет замеров.' }));
+    let lo = opts.min !== undefined ? opts.min : Math.min(0, minOf(pts) || 0);
+    let hi = opts.max !== undefined ? opts.max : (maxOf(pts) || 0);
+    if (opts.max === undefined) hi = hi * 1.1;
+    if (!(hi > lo)) hi = lo + 1;
+    const X = (k) => (b > 1 ? k / (b - 1) * W : W / 2);
+    const Y = (v) => 3 + (1 - clamp((v - lo) / (hi - lo), 0, 1)) * (H - 6);
+    const root = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, preserveAspectRatio: 'none', role: 'img', 'aria-label': opts.label || '' });
+    let d = '', open = false, first = -1, last = -1;
+    for (let k = 0; k < b; k++) {
+      if (pts[k] === null) { open = false; continue; }
+      if (first < 0) first = k;
+      last = k;
+      d += (open ? 'L' : 'M') + X(k).toFixed(1) + ',' + Y(pts[k]).toFixed(1);
+      open = true;
     }
-
-    body.push(el('h3', { text: 'Сервер и остальные процессы' }));
-    body.push(el('p', { class: 'card-desc', text: 'Сколько ядер в каждую секунду занимал сервер Minecraft и сколько — всё остальное на машине (например, Discord-бот или база данных).' }));
-    const proc = R.processCpu.map((v) => (v === null ? null : v * C));
-    const other = R.systemCpu.map((v, i) => (v === null || R.processCpu[i] === null ? null : Math.max(0, v - R.processCpu[i]) * C));
-    body.push(legend([
-      { name: 'Сервер Minecraft', color: 'var(--s1)' },
-      { name: 'Другие процессы', color: REST_COLOR },
-      { name: 'Все ядра машины (' + C + ')', dashed: true },
-    ]));
-    body.push(tsChart(R, () => ({
-      stacked: true,
-      height: 200,
-      series: [
-        { name: 'Сервер Minecraft', values: proc, color: 'var(--s1)' },
-        { name: 'Другие процессы', values: other, color: REST_COLOR },
-      ],
-      refs: [{ y: C, label: 'все ядра: ' + C }],
-      fixedMax: C,
-      yFmt: (v) => fmtNum(v, v % 1 ? 1 : 0),
-      valFmt: fmtCores,
-      ariaLabel: 'Загрузка машины: сервер и другие процессы',
-    })));
-    return card('cores', 'Ядра процессора', 'Каждая строка — логическое ядро, каждый столбец — секунда замера (в длинных замерах соседние секунды объединяются, и клетка показывает максимум за них). Чем ярче клетка, тем сильнее загружено ядро (всеми процессами машины).', body);
-  }
-
-  function sectionGroups(R) {
-    const C = R.system.logicalCores;
-    const colored = R.groups.filter((g) => Object.prototype.hasOwnProperty.call(GROUP_COLORS, g.id) && g.series);
-    const rest = R.groups.filter((g) => colored.indexOf(g) < 0 && g.series);
-    // stack order: the fixed order of GROUP_COLORS, so a colour sits in the same place in every report
-    const order = Object.keys(GROUP_COLORS);
-    colored.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
-    const series = colored.map((g) => ({ name: groupName(g.id), values: g.series, color: groupColor(g.id), id: g.id }));
-    if (rest.length) {
-      const vals = new Array(R.n).fill(0);
-      for (const g of rest) for (let i = 0; i < R.n; i++) vals[i] += g.series[i] || 0;
-      series.push({ name: 'Остальное', values: vals, color: REST_COLOR, id: '_rest' });
+    if (b === 1) d = 'M0,' + Y(pts[0]).toFixed(1) + 'L' + W + ',' + Y(pts[0]).toFixed(1);
+    const flat = (maxOf(pts) || 0) === (minOf(pts) || 0);
+    if (!opts.noArea && !flat && pts.every((v) => v !== null) && b > 1) {
+      const a = svg('path', { d: d + 'L' + X(last).toFixed(1) + ',' + H + 'L' + X(first).toFixed(1) + ',' + H + 'Z', class: 'w-spark-area' });
+      a.style.fill = gradientFill(root, opts.color, 0.35);
+      root.appendChild(a);
     }
-
-    let fullScale = false;
-    const seg = el('div', { class: 'seg', role: 'group', 'aria-label': 'Масштаб графика' });
-    const bFit = el('button', { type: 'button', 'aria-pressed': 'true', text: 'По данным' });
-    const bAll = el('button', { type: 'button', 'aria-pressed': 'false', text: 'Все ядра (' + C + ')' });
-    seg.append(bFit, bAll);
-
-    const chart = tsChart(R, () => ({
-      stacked: true,
-      height: 260,
-      series: series,
-      fixedMax: fullScale ? C : 0,
-      refs: [
-        { y: 1, label: '1 ядро', strong: false },
-        { y: C, label: 'все ядра: ' + C, strong: true },
-      ],
-      yFmt: (v) => fmtNum(v, v % 1 ? 1 : 0),
-      valFmt: fmtCores,
-      ariaLabel: 'Загрузка процессора по группам потоков',
-    }));
-    const setScale = (all) => {
-      fullScale = all;
-      bFit.setAttribute('aria-pressed', String(!all));
-      bAll.setAttribute('aria-pressed', String(all));
-      chart._redraw();
+    if (opts.ref !== undefined && opts.ref > lo && opts.ref < hi) {
+      root.appendChild(svg('line', { x1: 0, x2: W, y1: Y(opts.ref), y2: Y(opts.ref), class: 'w-spark-ref', 'vector-effect': 'non-scaling-stroke' }));
+    }
+    const line = svg('path', { d: d, class: 'w-spark-line', 'vector-effect': 'non-scaling-stroke' });
+    line.style.stroke = opts.color;
+    root.appendChild(line);
+    const cross = svg('line', { y1: 0, y2: H, class: 'w-spark-cross', 'vector-effect': 'non-scaling-stroke', visibility: 'hidden' });
+    root.appendChild(cross);
+    const onMove = (evt) => {
+      const r = root.getBoundingClientRect();
+      const f = clamp((evt.clientX - r.left) / (r.width || 1), 0, 1);
+      const i = Math.round(f * (n - 1));
+      const x = n > 1 ? i / (n - 1) * W : W / 2;
+      cross.setAttribute('x1', x); cross.setAttribute('x2', x);
+      cross.setAttribute('visibility', 'visible');
+      showTip(evt, timeLabel(R, R.t[i] !== undefined ? R.t[i] : 0), [{ color: opts.color, line: true, name: opts.label || '', value: values[i] === null ? 'нет данных' : opts.fmt(values[i]) }]);
     };
-    bFit.addEventListener('click', () => setScale(false));
-    bAll.addEventListener('click', () => setScale(true));
+    root.addEventListener('pointermove', onMove);
+    root.addEventListener('pointerdown', onMove);
+    root.addEventListener('pointerleave', () => { cross.setAttribute('visibility', 'hidden'); hideTip(); });
+    box.appendChild(root);
+    return box;
+  }
 
-    const legendItems = series.map((s) => ({ name: s.id === '_rest' ? 'Остальное: ' + rest.map((g) => groupName(g.id)).join(', ') : s.name, color: s.color }));
-    legendItems.push({ name: 'Пороги: 1 ядро и все ядра', dashed: true });
+  function widget(R, o) {
+    const st = o.status || null;
+    const w = el('div', { class: 'widget' + (st ? ' st-' + st : ' st-none') + (o.key ? ' key' : '') });
+    const head = el('div', { class: 'w-head' }, [el('span', { class: 'w-label', text: o.label })]);
+    if (st) {
+      head.appendChild(el('span', { class: 'w-status' }, [icon(STATUS[st].icon), STATUS[st].label]));
+    } else if (o.key) {
+      head.appendChild(el('span', { class: 'w-status' }, 'ключевой'));
+    }
+    w.appendChild(head);
+    const value = el('div', { class: 'w-value' }, [el('span', { class: 'w-num', text: o.value })]);
+    if (o.unit) value.appendChild(el('span', { class: 'w-unit', text: o.unit }));
+    w.appendChild(value);
+    w.appendChild(el('div', { class: 'w-sub', text: o.sub || ' ' }));
+    if (o.bar !== undefined && o.bar !== null) {
+      const m = el('div', { class: 'w-bar' });
+      const f = el('span');
+      f.style.width = clamp(o.bar * 100, 0, 100).toFixed(1) + '%';
+      f.style.background = statusVar(st);
+      m.appendChild(f);
+      w.appendChild(m);
+    }
+    if (o.spark) w.appendChild(miniSpark(R, o.spark.values, Object.assign({ color: statusVar(st) }, o.spark)));
+    return w;
+  }
 
-    const totalAvg = sum(R.groups.map((g) => g.avgCores));
-    const t = table([
-      { label: 'Группа', render: (g) => groupCell(g.id) },
-      { label: 'Потоков', cls: 'num opt', render: (g) => fmtNum(g.threads) },
-      { label: 'Среднее, ядер', cls: 'num', render: (g) => fmtNum(g.avgCores, 2) },
-      { label: 'Пик, ядер', cls: 'num', render: (g) => fmtNum(g.peakCores, 2) },
-      { label: '% машины', cls: 'num opt', render: (g) => fmtPct(g.avgCores / C, 1) },
-      { label: '% сервера', cls: 'num opt', render: (g) => (totalAvg > 0 ? fmtPct(g.avgCores / totalAvg, 0) : '—') },
-    ], R.groups);
+  // ---------------------------------------------------------------------
+  // Cards, notices, small parts
+  // ---------------------------------------------------------------------
 
-    const head = el('div', { class: 'card-head' }, [
+  function card(opts, body) {
+    const c = el('section', { class: 'card' + (opts.cls ? ' ' + opts.cls : ''), id: opts.id || null });
+    if (opts.title || opts.right) {
+      const head = el('div', { class: 'card-head' });
+      const left = el('div', { class: 'card-titles' }, [
+        opts.title ? el('h2', { text: opts.title }) : null,
+        opts.desc ? el('p', { class: 'card-desc', text: opts.desc }) : null,
+      ]);
+      head.appendChild(left);
+      if (opts.right) head.appendChild(el('div', { class: 'card-tools' }, opts.right));
+      c.appendChild(head);
+    }
+    append(c, body);
+    return c;
+  }
+
+  function noticeEl(kind, title, text) {
+    return el('div', { class: 'notice ' + kind, role: kind === 'error' ? 'alert' : null }, [
+      icon(kind === 'error' ? 'critical' : kind === 'warn' ? 'warning' : 'info', 'notice-icon'),
       el('div', null, [
-        el('h2', { text: 'Кто ест процессор' }),
-        el('p', { class: 'card-desc', text: 'Потоки сервера, сгруппированные по назначению. Высота — сколько ядер группа занимала в эту секунду. 1,0 = одно ядро полностью.' }),
-      ]),
-      seg,
-    ]);
-    const body = [head];
-    if (!R.groups.length) body.push(el('p', { class: 'empty', text: 'В отчёте нет данных о группах потоков.' }));
-    else {
-      body.push(legend(legendItems), chart);
-      if (!series.length) body.push(el('p', { class: 'chart-note', text: 'У групп нет поминутных рядов, показана только таблица.' }));
-      body.push(el('h3', { text: 'Группы потоков' }), t.wrap);
-    }
-    return el('section', { class: 'card', id: 'groups' }, body);
-  }
-
-  function sectionMain(R) {
-    const main = R.group('main');
-    if (!main || !main.series) {
-      return card('main', 'Главный поток', null, [el('p', { class: 'empty', text: 'В отчёте нет данных о главном потоке (Server thread).' })]);
-    }
-    const body = [
-      legend([{ name: 'Главный поток', color: 'var(--s1)', line: true }, { name: 'Предел: 1 ядро', dashed: true, color: 'var(--ref-strong)' }]),
-      tsChart(R, () => ({
-        height: 200,
-        series: [{ name: 'Главный поток', values: main.series, color: 'var(--s1)' }],
-        refs: [{ y: 1, label: 'предел: 1 ядро', strong: true, include: true }],
-        minMax: 1.1,
-        yFmt: (v) => fmtNum(v, 2),
-        valFmt: fmtCores,
-        ariaLabel: 'Загрузка главного потока',
-      })),
-      el('p', { class: 'chart-note', text: 'Среднее ' + fmtCores(main.avgCores) + ', пик ' + fmtCores(main.peakCores) + '. Если линия прижата к пределу, главный поток не успевает и сервер начинает лагать.' }),
-    ];
-    return card('main', 'Главный поток', 'Все тики мира (мобы, редстоун, блоки, игроки) считаются в одном потоке «Server thread». Он не может занять больше одного ядра.', body);
-  }
-
-  function sectionTicks(R) {
-    const tpsCard = card(null, 'TPS', 'Тиков в секунду, норма — 20.', [
-      tsChart(R, () => ({
-        height: 200,
-        series: [{ name: 'TPS', values: R.tps, color: 'var(--s1)' }],
-        fixedMax: 20,
-        yFmt: (v) => fmtNum(v, 0),
-        valFmt: (v) => fmtNum(v, 2),
-        ariaLabel: 'TPS по времени',
-      })),
-    ]);
-    const msptCard = card(null, 'MSPT', 'Длительность тика, мс. Больше 50 мс — сервер не успевает.', [
-      legend([
-        { name: 'Средний тик', color: 'var(--s1)', line: true },
-        { name: 'Самый долгий тик', color: 'var(--s2)', line: true },
-        { name: '50 мс', dashed: true, color: 'var(--ref-strong)' },
-      ]),
-      tsChart(R, () => ({
-        height: 200,
-        series: [
-          { name: 'Средний тик', values: R.msptAvg, color: 'var(--s1)' },
-          { name: 'Самый долгий тик', values: R.msptMax, color: 'var(--s2)' },
-        ],
-        refs: [{ y: 50, label: '50 мс', strong: true, include: true }],
-        yFmt: (v) => fmtNum(v, 0),
-        valFmt: fmtMs,
-        ariaLabel: 'MSPT по времени',
-      })),
-    ]);
-
-    const spikes = R.lagSpikes.slice(0, 20);
-    const maxMs = spikes.length ? spikes[0].ms : 1;
-    let spikesBody;
-    if (!spikes.length) spikesBody = el('p', { class: 'empty', text: 'Тиков дольше 50 мс не было.' });
-    else {
-      spikesBody = table([
-        { label: '№', cls: 'num', render: (s) => String(spikes.indexOf(s) + 1) },
-        { label: 'Когда', render: (s) => timeLabel(R, s.t) },
-        { label: 'Длительность', cls: 'num', render: (s) => fmtMs(s.ms) },
-        { label: '', cls: 'meter-cell', render: (s) => meter(s.ms / maxMs, s.ms >= 100) },
-        { label: 'GC в эту секунду', cls: 'num opt', render: (s) => (R.n ? fmtMs(R.gcTimeMs[sampleIndexAt(R, s.t)]) : '—') },
-      ], spikes).wrap;
-    }
-    const total = R.lagSpikes.length;
-    const spikesCard = card('spikes', 'Лаг-спайки', total
-      ? 'Тики дольше 50 мс, самые долгие сверху' + (total > 20 ? ' (показаны 20 из ' + total + ')' : '') + '.'
-      : null, [spikesBody]);
-    return [el('div', { class: 'grid-2', id: 'ticks' }, [tpsCard, msptCard]), spikesCard];
-  }
-
-  function sectionMemory(R) {
-    const heapMax = R.system.heapMaxBytes;
-    const unit = Math.max(heapMax || 0, maxOf(R.heapUsed) || 0) >= 2 * 1024 ** 3 ? 1024 ** 3 : 1024 ** 2;
-    const unitName = unit === 1024 ** 3 ? 'ГБ' : 'МБ';
-    const heapCard = card(null, 'Память (куча)', 'Занятая куча после каждой секунды и максимум (-Xmx).', [
-      legend([{ name: 'Занято', color: 'var(--s1)', line: true }, { name: 'Максимум', dashed: true }]),
-      tsChart(R, () => ({
-        height: 200,
-        series: [{ name: 'Занято', values: R.heapUsed, color: 'var(--s1)' }],
-        refs: heapMax ? [{ y: heapMax, label: 'максимум ' + fmtBytes(heapMax), include: true }] : [],
-        yScale: unit,
-        yFmt: (v) => fmtNum(v / unit, (v / unit) % 1 ? 1 : 0) + ' ' + unitName,
-        tipRows: (i) => {
-          const rows = [{ color: 'var(--s1)', line: true, name: 'Занято', value: fmtBytes(R.heapUsed[i]) }];
-          if (heapMax && R.heapUsed[i] !== null) rows.push({ name: 'От максимума', value: fmtPct(R.heapUsed[i] / heapMax) });
-          return rows;
-        },
-        ariaLabel: 'Занятая память по времени',
-      })),
-    ]);
-    const gcTotal = sum(R.gcTimeMs);
-    const gcCard = card(null, 'Сборка мусора', 'Время пауз сборщика мусора за каждую секунду, мс.', [
-      tsChart(R, () => ({
-        height: 200,
-        series: [{ name: 'Время GC', values: R.gcTimeMs, color: 'var(--s4)', kind: 'bar' }],
-        minMax: 10,
-        yFmt: (v) => fmtNum(v, 0),
-        tipRows: (i) => [
-          { color: 'var(--s4)', name: 'Время GC', value: fmtMs(R.gcTimeMs[i]) },
-          { name: 'Сборок', value: R.gcCount[i] === null ? '—' : fmtNum(R.gcCount[i]) },
-        ],
-        ariaLabel: 'Время сборки мусора по секундам',
-      })),
-      el('p', { class: 'chart-note', text: 'Всего ' + fmtMs(gcTotal) + ' за ' + fmtDuration(R.durationMs) + ' (' + fmtPct(R.durationMs > 0 ? gcTotal / R.durationMs : 0, 1) + ' времени).' }),
-    ]);
-    return el('div', { class: 'grid-2', id: 'memory' }, [heapCard, gcCard]);
-  }
-
-  function sectionThreads(R) {
-    const LIMIT = 200;
-    const input = el('input', { class: 'input', type: 'search', placeholder: 'Фильтр по имени или группе…', 'aria-label': 'Фильтр потоков' });
-    const count = el('span', { class: 'count' });
-    const columns = [
-      { label: 'Поток', cls: 'name', render: (t) => [t.name, el('span', { class: 'td-sub', text: groupName(t.group) })] },
-      { label: 'Группа', cls: 'opt', render: (t) => groupCell(t.group) },
-      { label: 'Ядер', cls: 'num', render: (t) => fmtNum(t.avgCores, 3) },
-      { label: 'CPU, мс', cls: 'num opt', render: (t) => fmtNum(t.cpuMs) },
-      { label: 'По времени', render: (t) => (t.series ? sparkline(R, t.series, t.name) : el('span', { class: 'muted', text: '—' })) },
-    ];
-    const t = table(columns, []);
-    const apply = () => {
-      const q = input.value.trim().toLowerCase();
-      const list = q ? R.threads.filter((th) => th.name.toLowerCase().includes(q) || th.group.toLowerCase().includes(q) || groupName(th.group).toLowerCase().includes(q)) : R.threads;
-      fillBody(t.tbody, columns, list.slice(0, LIMIT));
-      count.textContent = list.length > LIMIT
-        ? 'показаны ' + LIMIT + ' из ' + list.length + ', уточните фильтр'
-        : list.length + ' ' + plural(list.length, ['поток', 'потока', 'потоков']);
-    };
-    input.addEventListener('input', apply);
-    apply();
-    const src = R.system.perThreadSource === 'jmx'
-      ? 'Источник: JMX — только Java-потоки, внутренние потоки JVM (GC, JIT) не видны.'
-      : R.system.perThreadSource === 'proc' ? 'Источник: /proc — все потоки процесса, включая GC и JIT. Linux обрезает имена до 15 символов.' : '';
-    const body = R.threads.length
-      ? [el('div', { class: 'table-tools' }, [input, count]), t.wrap]
-      : [el('p', { class: 'empty', text: 'В отчёте нет списка потоков.' })];
-    return card('threads', 'Потоки', 'Все потоки за время замера, самые нагруженные сверху. График — для 24 самых занятых. ' + src, body);
-  }
-
-  function envName(w) {
-    return (Object.prototype.hasOwnProperty.call(ENV_NAMES, w.environment) ? ENV_NAMES[w.environment] : w.environment) || '—';
-  }
-
-  function sectionPluginsWorlds(R) {
-    const plugins = R.server.plugins.slice().sort((a, b) => a.name.localeCompare(b.name, 'ru'));
-    const pCard = card('plugins', 'Плагины', plugins.length ? plugins.length + ' ' + plural(plugins.length, ['плагин', 'плагина', 'плагинов']) : null, [
-      plugins.length ? table([
-        { label: 'Плагин', cls: 'name', render: (p) => p.name },
-        { label: 'Версия', cls: 'wrap', render: (p) => p.version || '—' },
-        { label: 'Статус', render: (p) => el('span', { class: p.enabled ? 'status-on' : 'status-off', text: p.enabled ? 'включён' : 'выключен' }) },
-      ], plugins).wrap : el('p', { class: 'empty', text: 'Плагинов нет или список не передан.' }),
-    ]);
-    const worlds = R.server.worlds;
-    const wCard = card('worlds', 'Миры', 'Состояние на конец замера.', [
-      worlds.length ? table([
-        { label: 'Мир', cls: 'name', render: (w) => [w.name, el('span', { class: 'td-sub', text: envName(w) })] },
-        { label: 'Тип', cls: 'wrap opt', render: (w) => envName(w) },
-        { label: 'Чанки', cls: 'num', render: (w) => fmtNum(w.loadedChunks) },
-        { label: 'Сущности', cls: 'num', render: (w) => fmtNum(w.entities) },
-        { label: 'Блок-сущности', cls: 'num opt', render: (w) => fmtNum(w.tileEntities) },
-        { label: 'Игроки', cls: 'num', render: (w) => fmtNum(w.players) },
-      ], worlds).wrap : el('p', { class: 'empty', text: 'Список миров не передан.' }),
-    ]);
-    const args = R.server.jvmArgs;
-    const jvm = el('section', { class: 'card', id: 'jvm' }, [
-      el('details', { class: 'jvm' }, [
-        el('summary', { text: 'Аргументы JVM (' + args.length + ')' }),
-        args.length ? el('ul', { class: 'jvm-list' }, args.map((a) => el('li', { text: a }))) : el('p', { class: 'empty', text: 'Аргументы не переданы.' }),
+        el('p', { class: 'notice-title', text: title }),
+        text ? el('p', { text: text }) : null,
       ]),
     ]);
-    return [wCard, pCard, jvm];
   }
 
-  function toc() {
-    const links = [
-      ['findings', 'Выводы'], ['cores', 'Ядра'], ['groups', 'Кто ест процессор'], ['main', 'Главный поток'],
-      ['ticks', 'TPS и MSPT'], ['spikes', 'Лаг-спайки'], ['memory', 'Память'], ['threads', 'Потоки'], ['worlds', 'Миры и плагины'],
-    ];
-    return el('nav', { class: 'toc', 'aria-label': 'Разделы отчёта' }, links.map((l) => {
-      const a = el('a', { href: '#' + l[0], text: l[1] });
-      a.addEventListener('click', (e) => {
-        const target = document.getElementById(l[0]);
-        if (target) { e.preventDefault(); target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
-      });
-      return a;
-    }));
+  /** Summary chip: small label, big (status-coloured) value, optional unit and sub-line. */
+  function chip(label, value, o) {
+    o = o || {};
+    const st = o.status || null;
+    const v = el('div', { class: 'sc-value' }, [el('span', { class: 'sc-num', text: value })]);
+    if (o.unit) v.appendChild(el('span', { class: 'sc-unit', text: o.unit }));
+    return el('div', { class: 'stat-chip' + (st ? ' has-st st-' + st : '') }, [
+      el('span', { class: 'sc-label' }, label),
+      v,
+      o.sub ? el('span', { class: 'sc-sub', text: o.sub }) : null,
+    ]);
+  }
+
+  function kv(rows) {
+    const dl = el('dl', { class: 'kv' });
+    for (const r of rows) {
+      dl.appendChild(el('dt', { text: r[0] }));
+      dl.appendChild(el('dd', { class: r[2] ? 'mono' : null, text: r[1] === null || r[1] === undefined || r[1] === '' ? '—' : r[1] }));
+    }
+    return dl;
+  }
+
+  function moreButton(text, onClick) {
+    const b = el('button', { class: 'btn btn-ghost btn-more', type: 'button', text: text });
+    b.addEventListener('click', onClick);
+    return b;
   }
 
   function reportSectionFailure(where, err) {
     if (window.console && console.warn) console.warn('amazake viewer: section failed', err);
-    const note = el('div', { class: 'notice error' }, [
-      el('p', { class: 'notice-title', text: 'Не удалось показать этот раздел' }),
-      el('p', { text: 'Возможно, в отчёте не хватает данных. Остальные разделы показаны.' }),
-    ]);
+    const note = noticeEl('error', 'Не удалось показать этот раздел', 'Возможно, в отчёте не хватает данных. Остальные разделы доступны на других вкладках.');
     if (where && where.replaceWith) where.replaceWith(note);
     return note;
   }
@@ -1483,9 +1375,715 @@
     }
   }
 
+  function stackedGroupSeries(R) {
+    const colored = R.groups.filter((g) => Object.prototype.hasOwnProperty.call(GROUP_COLORS, g.id) && g.series);
+    const rest = R.groups.filter((g) => colored.indexOf(g) < 0 && g.series);
+    const order = Object.keys(GROUP_COLORS);
+    colored.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+    const series = colored.map((g) => ({ name: groupName(g.id), values: g.series, color: groupColor(g.id), id: g.id }));
+    if (rest.length) {
+      const vals = new Array(R.n).fill(0);
+      for (const g of rest) for (let i = 0; i < R.n; i++) vals[i] += g.series[i] || 0;
+      series.push({ name: 'Остальное', values: vals, color: REST_COLOR, id: '_rest' });
+    }
+    return { series: series, rest: rest };
+  }
+
   // ---------------------------------------------------------------------
-  // Views
+  // Tab: Обзор
   // ---------------------------------------------------------------------
+
+  function tabOverview(R) {
+    const C = R.system.logicalCores;
+    const grid = el('div', { class: 'widgets' });
+
+    // TPS
+    const tpsAvg = mean(R.tps), tpsMin = minOf(R.tps);
+    grid.appendChild(widget(R, {
+      label: 'TPS', value: fmtNum(tpsAvg, 2), status: statusHigh(tpsAvg, 19.5, 17),
+      sub: tpsAvg === null ? 'нет данных' : 'минимум ' + fmtNum(tpsMin, 1) + ' · норма 20',
+      spark: { values: R.tps, min: 0, max: 20, label: 'TPS', fmt: (v) => fmtNum(v, 2) },
+    }));
+
+    // MSPT
+    const msptAvg = mean(R.msptAvg), msptMax = maxOf(R.msptMax);
+    grid.appendChild(widget(R, {
+      label: 'MSPT', value: fmtNum(msptAvg, 1), unit: msptAvg === null ? '' : 'мс', status: statusLow(msptAvg, 40, 50),
+      sub: msptAvg === null ? 'нет данных' : 'максимум ' + fmtMs(msptMax) + ' · предел 50 мс',
+      spark: { values: R.msptAvg, min: 0, ref: 50, label: 'Средний тик', fmt: fmtMs },
+    }));
+
+    // Main thread
+    const main = R.group('main');
+    grid.appendChild(widget(R, {
+      key: true,
+      label: 'Главный поток', value: main ? fmtNum(main.avgCores * 100, 0) : '—', unit: main ? '%' : '',
+      status: main ? statusLow(main.avgCores, 0.7, 0.9) : null,
+      sub: main ? 'одного ядра · пик ' + fmtPct(main.peakCores) : 'нет данных о Server thread',
+      spark: main && main.series ? { values: main.series, min: 0, max: Math.max(1, (maxOf(main.series) || 0)), ref: 1, label: 'Главный поток', fmt: (v) => fmtPct(v) + ' ядра' } : null,
+    }));
+
+    // Server CPU
+    const procAvg = mean(R.processCpu), procPeak = maxOf(R.processCpu);
+    grid.appendChild(widget(R, {
+      label: 'CPU сервера', value: procAvg === null ? '—' : fmtNum(procAvg * 100, 0), unit: procAvg === null ? '' : '%',
+      sub: procAvg === null ? 'нет данных' : '≈ ' + fmtNum(procAvg * C, 1) + ' из ' + C + ' ' + coresWord(C) + ' · пик ' + fmtPct(procPeak),
+      spark: { values: R.processCpu, min: 0, label: 'CPU сервера', fmt: (v) => fmtPct(v) + ' · ' + fmtCores(v * C) },
+    }));
+
+    // Machine CPU
+    const sysAvg = mean(R.systemCpu), sysPeak = maxOf(R.systemCpu);
+    grid.appendChild(widget(R, {
+      label: 'CPU машины', value: sysAvg === null ? '—' : fmtNum(sysAvg * 100, 0), unit: sysAvg === null ? '' : '%',
+      status: statusLow(sysAvg, 0.7, 0.85),
+      sub: sysAvg === null ? 'нет данных' : 'пик ' + fmtPct(sysPeak) + ' · ' + C + ' ' + plural(C, ['логическое ядро', 'логических ядра', 'логических ядер']),
+      spark: { values: R.systemCpu, min: 0, max: 1, label: 'CPU машины', fmt: (v) => fmtPct(v) },
+    }));
+
+    // Heap
+    const heapMax = R.system.heapMaxBytes, heapPeak = maxOf(R.heapUsed), heapAvg = mean(R.heapUsed);
+    const heapFrac = heapMax && heapPeak !== null ? heapPeak / heapMax : null;
+    grid.appendChild(widget(R, {
+      label: 'Память (куча)', value: heapPeak === null ? '—' : fmtBytes(heapPeak), unit: heapMax ? '/ ' + fmtBytes(heapMax) : '',
+      status: statusLow(heapFrac, 0.75, 0.9),
+      sub: heapPeak === null ? 'нет данных' : 'пик' + (heapFrac !== null ? ' ' + fmtPct(heapFrac) + ' кучи' : '') + ' · в среднем ' + fmtBytes(heapAvg),
+      bar: heapFrac,
+      spark: { values: R.heapUsed, min: 0, max: heapMax || undefined, label: 'Занято', fmt: fmtBytes },
+    }));
+
+    // GC
+    const gcTotal = sum(R.gcTimeMs), gcRuns = sum(R.gcCount);
+    const gcKnown = R.gcTimeMs.some((v) => v !== null);
+    const gcShare = gcKnown && R.durationMs > 0 ? gcTotal / R.durationMs : null;
+    const perMin = gcKnown && R.durationMs > 0 ? gcTotal / (R.durationMs / 60000) : null;
+    grid.appendChild(widget(R, {
+      label: 'Сборка мусора', value: fmtNum(perMin, 0), unit: perMin === null ? '' : 'мс/мин',
+      status: statusLow(gcShare, 0.03, 0.1),
+      sub: gcKnown ? fmtNum(gcRuns) + ' ' + plural(gcRuns, ['сборка', 'сборки', 'сборок']) + ' · ' + fmtPct(gcShare, 1) + ' времени' : 'нет данных',
+      spark: { values: R.gcTimeMs, min: 0, label: 'Время GC', fmt: fmtMs },
+    }));
+
+    // Players / entities / chunks
+    const lastOf = (a) => { for (let i = a.length - 1; i >= 0; i--) if (a[i] !== null) return a[i]; return null; };
+    let players = lastOf(R.players);
+    if (players === null) players = R.server.onlinePlayers;
+    let entities = lastOf(R.entities), chunks = lastOf(R.loadedChunks);
+    if (entities === null && R.server.worlds.length) entities = sum(R.server.worlds.map((w) => w.entities));
+    if (chunks === null && R.server.worlds.length) chunks = sum(R.server.worlds.map((w) => w.loadedChunks));
+    grid.appendChild(widget(R, {
+      label: 'Игроки', value: fmtNum(players), unit: R.server.maxPlayers !== null && players !== null ? '/ ' + fmtNum(R.server.maxPlayers) : '',
+      sub: 'сущности ' + fmtNum(entities) + ' · чанки ' + fmtNum(chunks),
+      spark: { values: R.players, min: 0, noArea: true, label: 'Игроки', fmt: (v) => fmtNum(v) },
+    }));
+
+    // Findings
+    const list = el('ul', { class: 'findings' });
+    for (const f of current.findings) {
+      const li = el('li', { class: 'finding sev-' + f.severity });
+      // Phones show two lines of each finding; this button (hidden on wide screens) opens the rest.
+      const more = el('button', { class: 'finding-more', type: 'button', 'aria-expanded': 'false', text: 'Подробнее' });
+      more.addEventListener('click', () => {
+        const open = li.classList.toggle('open');
+        more.setAttribute('aria-expanded', String(open));
+        more.textContent = open ? 'Свернуть' : 'Подробнее';
+      });
+      append(li, [
+        el('span', { class: 'finding-icon' }, icon(f.severity === 'info' ? 'info' : f.severity)),
+        el('div', { class: 'finding-body' }, [
+          el('div', { class: 'finding-top' }, [
+            el('p', { class: 'finding-title', text: f.title }),
+            el('span', { class: 'badge sev-' + f.severity, text: SEVERITY[f.severity].label }),
+          ]),
+          el('p', { class: 'finding-text', text: f.text }),
+          more,
+        ]),
+      ]);
+      list.appendChild(li);
+    }
+    const findCard = card({ title: 'Выводы', desc: 'Автоматические подсказки по этому замеру, самые важные сверху. Это правила, а не приговор: сверяйтесь с графиками на вкладках.' }, list);
+
+    // Top groups
+    const total = sum(R.groups.map((g) => g.avgCores));
+    const top = el('div', { class: 'toplist' });
+    for (const g of R.groups.slice(0, 7)) {
+      const share = total > 0 ? g.avgCores / total : 0;
+      const bar = el('div', { class: 'share-bar' });
+      const fill = el('span');
+      fill.style.width = clamp(share * 100, 0, 100).toFixed(1) + '%';
+      fill.style.background = groupColor(g.id);
+      bar.appendChild(fill);
+      top.appendChild(el('div', { class: 'toplist-row' }, [
+        el('div', { class: 'toplist-name' }, [swatch(g.id), el('span', { text: groupName(g.id) })]),
+        el('span', { class: 'toplist-val mono', text: fmtNum(g.avgCores, 2) }),
+        bar,
+      ]));
+    }
+    const goThreads = el('button', { class: 'btn btn-ghost btn-small', type: 'button' }, ['Все потоки', icon('arrow')]);
+    goThreads.addEventListener('click', () => setTab('threads', true));
+    const topCard = card({ title: 'Кто ест процессор', desc: 'Среднее число занятых ядер по группам потоков.', cls: 'side' },
+      R.groups.length ? [top, el('div', { class: 'card-foot' }, goThreads)] : el('p', { class: 'empty', text: 'В отчёте нет данных о группах потоков.' }));
+
+    return [grid, el('div', { class: 'overview-split' }, [findCard, topCard])];
+  }
+
+  function swatch(id) {
+    const sw = el('span', { class: 'swatch' });
+    sw.style.background = groupColor(id);
+    return sw;
+  }
+
+  // ---------------------------------------------------------------------
+  // Tab: Ядра
+  // ---------------------------------------------------------------------
+
+  const CORES_COMPACT = 32;
+  const CORES_TOP = 16;
+
+  function tabCores(R) {
+    const C = R.system.logicalCores;
+    const out = [];
+    if (R.system.perCore && R.n) {
+      const avg = current.coreAvg || (current.coreAvg = coreAverages(R));
+      out.push(card({
+        title: 'Загрузка ядер',
+        desc: 'Строка — логическое ядро, столбец — интервал замера (в длинных замерах соседние интервалы объединяются, клетка показывает максимум). Чем ярче, тем сильнее загружено ядро всеми процессами машины.',
+        right: heatLegend(),
+      }, heatmap(R)));
+      const bars = el('div', { class: 'core-bars' });
+      const coreBar = (k) => {
+        const v = avg[k];
+        const st = v >= 0.9 ? 'bad' : v >= 0.7 ? 'warn' : null;
+        const m = el('div', { class: 'meter' });
+        const fill = el('span');
+        fill.style.width = clamp(v * 100, 0, 100).toFixed(1) + '%';
+        fill.style.background = st ? statusVar(st) : 'var(--accent)';
+        m.appendChild(fill);
+        return el('div', { class: 'core-bar' }, [
+          el('span', { class: 'name mono', text: 'ядро ' + k }), m, el('span', { class: 'val mono', text: fmtPct(v) }),
+        ]);
+      };
+      const fillBars = (idx) => {
+        bars.textContent = '';
+        const frag = document.createDocumentFragment();
+        for (const k of idx) frag.appendChild(coreBar(k));
+        bars.appendChild(frag);
+      };
+      const all = avg.map((_, k) => k);
+      const med = medianOf(avg);
+      const body = [bars];
+      let desc = 'Медиана ' + fmtPct(med) + ', самое загруженное ' + fmtPct(maxOf(avg)) + '. Жёлтым — от 70 %, красным — от 90 %.';
+      if (avg.length > CORES_COMPACT) {
+        // Big machines: the busiest cores first, the full list on demand.
+        const busiest = all.slice().sort((a, b) => avg[b] - avg[a]).slice(0, CORES_TOP);
+        fillBars(busiest);
+        desc += ' Показаны ' + CORES_TOP + ' самых загруженных из ' + avg.length + '.';
+        const foot = el('div', { class: 'card-foot' });
+        foot.appendChild(moreButton('Показать все ' + avg.length + ' ' + coresWord(avg.length), () => { fillBars(all); foot.remove(); }));
+        body.push(foot);
+      } else {
+        fillBars(all);
+      }
+      out.push(card({ title: 'Средняя загрузка каждого ядра', desc: desc }, body));
+    } else {
+      out.push(noticeEl('info', 'Загрузка по отдельным ядрам недоступна', R.n ? 'Сервер собирает её только на Linux (/proc/stat). Ниже — общая загрузка машины.' : 'В отчёте нет замеров.'));
+    }
+    const proc = R.processCpu.map((v) => (v === null ? null : v * C));
+    const other = R.systemCpu.map((v, i) => (v === null || R.processCpu[i] === null ? null : Math.max(0, v - R.processCpu[i]) * C));
+    out.push(card({
+      title: 'Сервер и остальные процессы',
+      desc: 'Сколько ядер в каждый момент занимал сервер Minecraft и сколько — всё остальное на машине (например, Discord-бот или база данных).',
+    }, [
+      legend([
+        { name: 'Сервер Minecraft', color: 'var(--s1)' },
+        { name: 'Другие процессы', color: REST_COLOR },
+        { name: 'Все ядра машины (' + C + ')', dashed: true },
+      ]),
+      tsChart(R, () => ({
+        stacked: true,
+        height: 240,
+        series: [
+          { name: 'Сервер Minecraft', values: proc, color: 'var(--s1)' },
+          { name: 'Другие процессы', values: other, color: REST_COLOR },
+        ],
+        refs: [{ y: C, label: 'все ядра: ' + C }],
+        fixedMax: C,
+        yFmt: (v) => fmtNum(v, v % 1 ? 1 : 0),
+        valFmt: fmtCores,
+        ariaLabel: 'Загрузка машины: сервер и другие процессы',
+      })),
+    ]));
+    return out;
+  }
+
+  // ---------------------------------------------------------------------
+  // Tab: Потоки (stacked chart + expandable group tree)
+  // ---------------------------------------------------------------------
+
+  function tabThreads(R) {
+    const C = R.system.logicalCores;
+    const out = [];
+    const st = stackedGroupSeries(R);
+
+    let fullScale = false;
+    const seg = el('div', { class: 'seg', role: 'group', 'aria-label': 'Масштаб графика' });
+    const bFit = el('button', { type: 'button', 'aria-pressed': 'true', text: 'По данным' });
+    const bAll = el('button', { type: 'button', 'aria-pressed': 'false', text: 'Все ядра (' + C + ')' });
+    seg.append(bFit, bAll);
+    const chart = tsChart(R, () => ({
+      stacked: true,
+      height: 280,
+      series: st.series,
+      fixedMax: fullScale ? C : 0,
+      refs: [
+        { y: 1, label: '1 ядро', strong: false },
+        { y: C, label: 'все ядра: ' + C, strong: true },
+      ],
+      yFmt: (v) => fmtNum(v, v % 1 ? 1 : 0),
+      valFmt: fmtCores,
+      ariaLabel: 'Загрузка процессора по группам потоков',
+    }));
+    const legendItems = () => {
+      const items = st.series.map((s) => ({ name: s.id === '_rest' ? 'Остальное: ' + st.rest.map((g) => groupName(g.id)).join(', ') : s.name, color: s.color }));
+      items.push({ name: fullScale ? 'Пунктир: 1 ядро и все ядра (' + C + ')' : 'Пунктир: 1 ядро (все ' + C + ' — в режиме «Все ядра»)', dashed: true });
+      return items;
+    };
+    let legendEl = legend(legendItems());
+    const setScale = (all) => {
+      fullScale = all;
+      bFit.setAttribute('aria-pressed', String(!all));
+      bAll.setAttribute('aria-pressed', String(all));
+      const next = legend(legendItems());
+      legendEl.replaceWith(next);
+      legendEl = next;
+      chart._redraw();
+    };
+    bFit.addEventListener('click', () => setScale(false));
+    bAll.addEventListener('click', () => setScale(true));
+
+    if (R.groups.length) {
+      out.push(card({
+        title: 'Кто ест процессор',
+        desc: 'Потоки сервера, сгруппированные по назначению. Высота — сколько ядер группа занимала в этот момент; 1,0 = одно ядро полностью.',
+        right: seg,
+      }, st.series.length ? [legendEl, chart] : el('p', { class: 'chart-note', text: 'У групп нет рядов по времени, показан только список ниже.' })));
+    }
+    out.push(threadTree(R));
+    return out;
+  }
+
+  const TREE_FIRST = 50;
+  const TREE_STEP = 100;
+
+  function threadTree(R) {
+    const C = R.system.logicalCores;
+    // Groups from the report plus any group that only appears on threads.
+    const groups = R.groups.map((g) => ({ g: g, threads: [] }));
+    const byId = new Map(groups.map((x) => [x.g.id, x]));
+    for (const t of R.threads) {
+      let x = byId.get(t.group);
+      if (!x) {
+        x = { g: { id: t.group, threads: 0, cpuMs: 0, avgCores: 0, peakCores: 0, series: null, synthetic: true }, threads: [] };
+        byId.set(t.group, x);
+        groups.push(x);
+      }
+      x.threads.push(t);
+      if (x.g.synthetic) { x.g.threads++; x.g.cpuMs += t.cpuMs; x.g.avgCores += t.avgCores; }
+    }
+    groups.sort((a, b) => b.g.avgCores - a.g.avgCores);
+    const total = sum(groups.map((x) => x.g.avgCores));
+    const expanded = new Set();
+
+    const input = el('input', { class: 'input', type: 'search', placeholder: 'Поиск потока или группы…', 'aria-label': 'Фильтр потоков', autocomplete: 'off', spellcheck: 'false' });
+    const searchBox = el('label', { class: 'search' }, [icon('search'), input]);
+    const count = el('span', { class: 'count' });
+    const list = el('div', { class: 'tree', role: 'list' });
+
+    const header = el('div', { class: 'tree-row tree-header', 'aria-hidden': 'true' }, [
+      el('span', { class: 'tc-name', text: 'Группа / поток' }),
+      el('span', { class: 'tc-share', text: 'Доля CPU сервера' }),
+      el('span', { class: 'tc-num', text: 'Среднее' }),
+      el('span', { class: 'tc-extra' }, [
+        el('span', { class: 'tc-num', text: 'Пик' }),
+        el('span', { class: 'tc-num', text: 'Потоков' }),
+        el('span', { class: 'tc-num', text: 'CPU-время' }),
+        el('span', { class: 'tc-spark', text: 'По времени' }),
+      ]),
+    ]);
+
+    // Peak, thread count, CPU time and sparkline. On wide screens these are grid
+    // columns (display: contents); on phones they become a labelled second line.
+    function extraCells(peak, nThreads, cpuMs, series, name, color) {
+      return el('span', { class: 'tc-extra' }, [
+        el('span', { class: 'tc-num mono', 'data-l': 'пик', text: peak === null ? '—' : fmtNum(peak, 2) }),
+        el('span', { class: 'tc-num mono' + (nThreads === null ? ' na' : ''), 'data-l': 'потоков', text: nThreads === null ? '—' : fmtNum(nThreads) }),
+        el('span', { class: 'tc-num mono', 'data-l': 'CPU', title: fmtNum(cpuMs) + ' мс CPU', text: fmtNum(cpuMs / 1000, 1) + NBSP + 'с' }),
+        el('span', { class: 'tc-spark' }, series ? sparkline(R, series, name, color) : el('span', { class: 'muted', text: '—' })),
+      ]);
+    }
+
+    function shareCell(v, color) {
+      const share = total > 0 ? v / total : 0;
+      const bar = el('div', { class: 'share-bar' });
+      const fill = el('span');
+      fill.style.width = clamp(share * 100, 0, 100).toFixed(2) + '%';
+      fill.style.background = color;
+      bar.appendChild(fill);
+      return el('span', { class: 'tc-share' }, [bar, el('span', { class: 'share-pct mono', text: total > 0 ? fmtNum(share * 100, share * 100 < 9.95 ? 1 : 0) + ' %' : '—' })]);
+    }
+
+    function threadRow(t) {
+      const peak = t.series ? maxOf(t.series) : null;
+      return el('div', { class: 'tree-row thread-row', role: 'listitem' }, [
+        el('span', { class: 'tc-name' }, [el('span', { class: 'thread-name mono', text: t.name, title: t.name })]),
+        shareCell(t.avgCores, groupColor(t.group)),
+        el('span', { class: 'tc-num mono', 'data-l': 'среднее', text: fmtNum(t.avgCores, 2) }),
+        extraCells(peak, null, t.cpuMs, t.series, t.name, groupColor(t.group)),
+      ]);
+    }
+
+    function groupBlock(x, threads, open) {
+      const g = x.g;
+      const block = el('div', { class: 'tree-group' + (open ? ' open' : ''), role: 'listitem' });
+      const btn = el('button', { class: 'tree-row group-row', type: 'button', 'aria-expanded': String(open) }, [
+        el('span', { class: 'tc-name' }, [icon('chevron', 'chev'), swatch(g.id), el('span', { class: 'group-label', text: groupName(g.id) })]),
+        shareCell(g.avgCores, groupColor(g.id)),
+        el('span', { class: 'tc-num mono', 'data-l': 'среднее', text: fmtNum(g.avgCores, 2) }),
+        extraCells(g.synthetic ? null : g.peakCores, g.threads, g.cpuMs, g.series, groupName(g.id), groupColor(g.id)),
+      ]);
+      block.appendChild(btn);
+      const body = el('div', { class: 'tree-children' });
+      let shown = 0;
+      const fill = (k) => {
+        const more = body.querySelector('.tree-more');
+        if (more) more.remove();
+        const end = Math.min(threads.length, shown + k);
+        const frag = document.createDocumentFragment();
+        for (let i = shown; i < end; i++) frag.appendChild(threadRow(threads[i]));
+        body.appendChild(frag);
+        shown = end;
+        if (shown < threads.length) {
+          const rest = threads.length - shown;
+          body.appendChild(el('div', { class: 'tree-more' }, moreButton('Показать ещё ' + Math.min(TREE_STEP, rest) + ' из ' + rest, () => fill(TREE_STEP))));
+        }
+      };
+      const build = () => {
+        if (body.childNodes.length) return;
+        body.appendChild(el('p', { class: 'tree-meta' }, [
+          fmtPct(g.avgCores / C, 1) + ' всей машины · ' + (total > 0 ? fmtPct(g.avgCores / total, 0) : '—') + ' нагрузки сервера · CPU-время ' + fmtNum(g.cpuMs / 1000, 1) + ' с',
+          g.peakCores && !g.synthetic ? ' · пик ' + fmtCores(g.peakCores) : '',
+        ]));
+        if (!threads.length) body.appendChild(el('p', { class: 'tree-meta muted', text: 'Потоки этой группы в отчёт не попали.' }));
+        fill(TREE_FIRST);
+      };
+      if (open) { build(); block.appendChild(body); }
+      btn.addEventListener('click', () => {
+        const now = !block.classList.contains('open');
+        block.classList.toggle('open', now);
+        btn.setAttribute('aria-expanded', String(now));
+        if (now) { expanded.add(g.id); build(); block.appendChild(body); } else { expanded.delete(g.id); body.remove(); }
+      });
+      return block;
+    }
+
+    const apply = () => {
+      const q = input.value.trim().toLowerCase();
+      list.textContent = '';
+      list.appendChild(header);
+      let nThreads = 0, nGroups = 0;
+      for (const x of groups) {
+        const gMatch = q && (x.g.id.toLowerCase().includes(q) || groupName(x.g.id).toLowerCase().includes(q));
+        const threads = !q || gMatch ? x.threads : x.threads.filter((t) => t.name.toLowerCase().includes(q));
+        if (q && !gMatch && !threads.length) continue;
+        nGroups++;
+        nThreads += threads.length;
+        list.appendChild(groupBlock(x, threads, q ? (!gMatch || expanded.has(x.g.id)) : expanded.has(x.g.id)));
+      }
+      if (!nGroups) list.appendChild(el('p', { class: 'empty', text: 'Ничего не найдено.' }));
+      count.textContent = q
+        ? 'найдено: ' + nThreads + ' ' + plural(nThreads, ['поток', 'потока', 'потоков']) + ' в ' + nGroups + ' ' + plural(nGroups, ['группе', 'группах', 'группах'])
+        : R.threads.length + ' ' + plural(R.threads.length, ['поток', 'потока', 'потоков']) + ' в ' + groups.length + ' ' + plural(groups.length, ['группе', 'группах', 'группах']);
+    };
+    let timer = 0;
+    input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(apply, 120); });
+    if (groups.length) { expanded.add(groups[0].g.id); apply(); }
+
+    const src = R.system.perThreadSource === 'jmx'
+      ? 'Источник: JMX — только Java-потоки, внутренние потоки JVM (GC, JIT) не видны.'
+      : R.system.perThreadSource === 'proc' ? 'Источник: /proc — все потоки процесса, включая GC и JIT; Linux обрезает имена до 15 символов.' : '';
+    return card({
+      title: 'Группы и потоки',
+      desc: 'Нажмите на группу, чтобы увидеть её потоки. Полоса — доля в общей нагрузке сервера; «Среднее» и «Пик» — в ядрах. График по времени есть у 24 самых занятых потоков. ' + src,
+      right: groups.length ? [searchBox] : null,
+    }, groups.length ? [el('div', { class: 'tree-tools' }, count), list] : el('p', { class: 'empty', text: 'В отчёте нет данных о потоках.' }));
+  }
+
+  // ---------------------------------------------------------------------
+  // Tab: Тики
+  // ---------------------------------------------------------------------
+
+  const SPIKES_FIRST = 20;
+
+  function tabTicks(R) {
+    const tpsAvg = mean(R.tps), msptAvg = mean(R.msptAvg), msptMax = maxOf(R.msptMax);
+    const tpsMin = minOf(R.tps);
+    const nSpikes = R.lagSpikes.length;
+    const worstSpike = nSpikes ? R.lagSpikes[0].ms : null;
+    // Same formatters and thresholds as the «Обзор» widgets.
+    const chips = el('div', { class: 'stat-chips' }, [
+      chip('TPS в среднем', fmtNum(tpsAvg, 2), { status: statusHigh(tpsAvg, 19.5, 17), sub: 'норма 20' }),
+      chip('TPS минимум', fmtNum(tpsMin, 1), { status: statusHigh(tpsMin, 19.5, 17) }),
+      chip('MSPT в среднем', fmtNum(msptAvg, 1), { unit: msptAvg === null ? '' : 'мс', status: statusLow(msptAvg, 40, 50), sub: 'предел 50 мс' }),
+      chip('Самый долгий тик', fmtNum(msptMax, 0), { unit: msptMax === null ? '' : 'мс', status: statusLow(msptMax, 50, 100) }),
+      chip('Лаг-спайков', fmtNum(nSpikes), { status: nSpikes === 0 ? 'good' : statusLow(worstSpike, 100, 150) === 'bad' || nSpikes > 10 ? 'bad' : 'warn', sub: nSpikes ? 'тиков дольше 50 мс' : 'тиков > 50 мс не было' }),
+    ]);
+    // The axis follows the data (a dip from 20 to 17,6 must be visible), capped just above 20.
+    const tpsLow = minOf(R.tps);
+    const tpsMax = Math.max(20.5, Math.ceil((maxOf(R.tps) || 20) * 2) / 2);
+    const tpsCard = card({ title: 'TPS', desc: 'Тиков в секунду, норма — 20. Ось начинается не с нуля, чтобы были видны просадки.' }, [
+      legend([
+        { name: 'TPS', color: 'var(--s1)', line: true },
+        { name: '19,5 — граница нормы', dashed: true },
+      ]),
+      tsChart(R, () => ({
+        height: 220,
+        series: [{ name: 'TPS', values: R.tps, color: 'var(--s1)' }],
+        fixedMax: tpsMax,
+        yMin: tpsLow === null ? 0 : Math.max(0, Math.min(18, Math.floor(tpsLow) - 1)),
+        refs: [{ y: 19.5, label: '19,5' }],
+        yFmt: (v) => fmtNum(v, v % 1 ? 1 : 0),
+        valFmt: (v) => fmtNum(v, 2),
+        ariaLabel: 'TPS по времени',
+      })),
+    ]);
+    const msptCard = card({ title: 'MSPT', desc: 'Длительность тика, мс. Дольше 50 мс — сервер не успевает.' }, [
+      legend([
+        { name: 'Средний тик', color: 'var(--s1)', line: true },
+        { name: 'Самый долгий тик', color: 'var(--s2)', line: true },
+        { name: '50 мс', dashed: true, color: 'var(--ref-strong)' },
+      ]),
+      tsChart(R, () => ({
+        height: 220,
+        series: [
+          { name: 'Средний тик', values: R.msptAvg, color: 'var(--s1)', area: true },
+          { name: 'Самый долгий тик', values: R.msptMax, color: 'var(--s2)', width: 1.5 },
+        ],
+        refs: [{ y: 50, label: '50 мс', strong: true, include: true }],
+        yFmt: (v) => fmtNum(v, 0),
+        valFmt: fmtMs,
+        ariaLabel: 'MSPT по времени',
+      })),
+    ]);
+
+    const main = R.group('main');
+    const mainCard = (!main || !main.series)
+      ? card({ title: 'Главный поток' }, el('p', { class: 'empty', text: 'В отчёте нет данных о главном потоке (Server thread).' }))
+      : card({ title: 'Главный поток', desc: 'Все тики мира (мобы, редстоун, блоки, игроки) считаются в одном потоке «Server thread». Он не может занять больше одного ядра.' }, [
+        legend([{ name: 'Главный поток', color: 'var(--s1)', line: true }, { name: 'Предел: 1 ядро', dashed: true, color: 'var(--ref-strong)' }]),
+        tsChart(R, () => ({
+          height: 220,
+          series: [{ name: 'Главный поток', values: main.series, color: 'var(--s1)', area: true }],
+          refs: [{ y: 1, label: 'предел: 1 ядро', strong: true, include: true }],
+          minMax: 1.1,
+          yFmt: (v) => fmtNum(v, 2),
+          valFmt: fmtCores,
+          ariaLabel: 'Загрузка главного потока',
+        })),
+        el('p', { class: 'chart-note', text: 'Среднее ' + fmtCores(main.avgCores) + ', пик ' + fmtCores(main.peakCores) + '. Если линия прижата к пределу, главный поток не успевает и сервер начинает лагать.' }),
+      ]);
+
+    const spikes = R.lagSpikes;
+    const maxMs = spikes.length ? spikes[0].ms : 1;
+    let spikesBody;
+    if (!spikes.length) spikesBody = el('p', { class: 'empty good-empty' }, [icon('good'), 'Тиков дольше 50 мс не было.']);
+    else {
+      const columns = [
+        { label: '№', cls: 'num', render: (s) => String(s._k) },
+        { label: 'Когда', cls: 'mono', render: (s) => timeLabel(R, s.t) },
+        { label: 'Длительность', cls: 'num', render: (s) => el('span', { class: 'ms-val ' + (s.ms >= 100 ? 'bad' : 'warn'), text: fmtMs(s.ms) }) },
+        { label: 'От самого долгого', cls: 'meter-cell', render: (s) => spikeMeter(s.ms / maxMs, s.ms) },
+        { label: 'GC в этот интервал', cls: 'num opt', render: (s) => (R.n ? fmtMs(R.gcTimeMs[sampleIndexAt(R, s.t)]) : '—') },
+      ];
+      const rows = spikes.map((s, k) => ({ t: s.t, ms: s.ms, _k: k + 1 }));
+      const t = table(columns, rows.slice(0, SPIKES_FIRST));
+      spikesBody = [t.wrap];
+      if (rows.length > SPIKES_FIRST) {
+        const foot = el('div', { class: 'card-foot' });
+        let shown = SPIKES_FIRST;
+        const btn = moreButton('Показать все ' + rows.length, () => {
+          shown = rows.length;
+          fillBody(t.tbody, columns, rows.slice(0, shown));
+          foot.remove();
+        });
+        foot.appendChild(btn);
+        spikesBody.push(foot);
+      }
+    }
+    const spikesCard = card({ id: 'spikes', title: 'Лаг-спайки', desc: spikes.length ? 'Тики дольше 50 мс, самые долгие сверху (' + spikes.length + '). Жёлтым — до 100 мс, красным — от 100 мс.' : null }, spikesBody);
+    return [chips, el('div', { class: 'grid-2' }, [tpsCard, msptCard]), mainCard, spikesCard];
+  }
+
+  function spikeMeter(frac, ms) {
+    const m = el('div', { class: 'meter' });
+    const f = el('span');
+    f.style.width = clamp(frac * 100, 0, 100).toFixed(1) + '%';
+    // Every spike is over 50 ms: amber up to 100 ms, red from 100 ms. Never the accent.
+    f.style.background = ms >= 100 ? 'var(--critical)' : 'var(--warning)';
+    m.appendChild(f);
+    return m;
+  }
+
+  // ---------------------------------------------------------------------
+  // Tab: Память
+  // ---------------------------------------------------------------------
+
+  function tabMemory(R) {
+    const heapMax = R.system.heapMaxBytes;
+    const gcTotal = sum(R.gcTimeMs), runs = sum(R.gcCount);
+    const heapPeak = maxOf(R.heapUsed);
+    const heapFrac = heapMax && heapPeak !== null ? heapPeak / heapMax : null;
+    const gcKnown = R.gcTimeMs.some((v) => v !== null);
+    const gcShare = gcKnown && R.durationMs > 0 ? gcTotal / R.durationMs : null;
+    const chips = el('div', { class: 'stat-chips' }, [
+      chip(['Максимум кучи ', el('span', { class: 'nt', text: '(-Xmx)' })], fmtBytes(heapMax)),
+      chip('Занято в пике', fmtBytes(heapPeak), { status: statusLow(heapFrac, 0.75, 0.9), sub: heapFrac !== null ? fmtPct(heapFrac) + ' от максимума' : null }),
+      chip('Занято в среднем', fmtBytes(mean(R.heapUsed))),
+      chip('Сборок мусора', fmtNum(gcKnown || R.gcCount.some((v) => v !== null) ? runs : null)),
+      chip('Время GC', fmtMs(gcKnown ? gcTotal : null), { status: statusLow(gcShare, 0.03, 0.1), sub: gcShare !== null ? fmtPct(gcShare, 1) + ' времени' : null }),
+      chip('Средняя пауза', runs > 0 ? fmtMs(gcTotal / runs) : '—'),
+    ]);
+    const unit = Math.max(heapMax || 0, maxOf(R.heapUsed) || 0) >= 2 * 1024 ** 3 ? 1024 ** 3 : 1024 ** 2;
+    const unitName = unit === 1024 ** 3 ? 'ГБ' : 'МБ';
+    const heapCard = card({ title: 'Память (куча)', desc: 'Занятая куча после каждого интервала и максимум (-Xmx).' }, [
+      legend([{ name: 'Занято', color: 'var(--s1)', line: true }, { name: 'Максимум', dashed: true }]),
+      tsChart(R, () => ({
+        height: 240,
+        series: [{ name: 'Занято', values: R.heapUsed, color: 'var(--s1)', area: true }],
+        refs: heapMax ? [{ y: heapMax, label: 'максимум ' + fmtBytes(heapMax), include: true }] : [],
+        yScale: unit,
+        yFmt: (v) => fmtNum(v / unit, (v / unit) % 1 ? 1 : 0) + ' ' + unitName,
+        tipRows: (i) => {
+          const rows = [{ color: 'var(--s1)', line: true, name: 'Занято', value: fmtBytes(R.heapUsed[i]) }];
+          if (heapMax && R.heapUsed[i] !== null) rows.push({ name: 'От максимума', value: fmtPct(R.heapUsed[i] / heapMax) });
+          return rows;
+        },
+        ariaLabel: 'Занятая память по времени',
+      })),
+    ]);
+    const gcCard = card({ title: 'Время сборки мусора', desc: 'Паузы сборщика мусора за каждый интервал, мс.' }, [
+      tsChart(R, () => ({
+        height: 200,
+        series: [{ name: 'Время GC', values: R.gcTimeMs, color: 'var(--s4)', kind: 'bar' }],
+        minMax: 10,
+        yFmt: (v) => fmtNum(v, 0),
+        tipRows: (i) => [
+          { color: 'var(--s4)', name: 'Время GC', value: fmtMs(R.gcTimeMs[i]) },
+          { name: 'Сборок', value: R.gcCount[i] === null ? '—' : fmtNum(R.gcCount[i]) },
+        ],
+        ariaLabel: 'Время сборки мусора по интервалам',
+      })),
+      el('p', { class: 'chart-note', text: 'Всего ' + fmtMs(gcTotal) + ' за ' + fmtDuration(R.durationMs) + ' (' + fmtPct(R.durationMs > 0 ? gcTotal / R.durationMs : 0, 1) + ' времени).' }),
+    ]);
+    const cntCard = card({ title: 'Число сборок', desc: 'Сколько раз сборщик мусора запускался за интервал (все сборщики).' }, [
+      tsChart(R, () => ({
+        height: 200,
+        series: [{ name: 'Сборок', values: R.gcCount, color: 'var(--s7)', kind: 'bar' }],
+        minMax: 2,
+        yFmt: (v) => fmtNum(v, v % 1 ? 1 : 0),
+        valFmt: (v) => fmtNum(v),
+        ariaLabel: 'Число сборок мусора по интервалам',
+      })),
+      el('p', { class: 'chart-note', text: 'Всего ' + fmtNum(runs) + ' ' + plural(runs, ['сборка', 'сборки', 'сборок']) + '.' }),
+    ]);
+    return [chips, heapCard, el('div', { class: 'grid-2' }, [gcCard, cntCard])];
+  }
+
+  // ---------------------------------------------------------------------
+  // Tab: Сервер
+  // ---------------------------------------------------------------------
+
+  function envName(w) {
+    return (Object.prototype.hasOwnProperty.call(ENV_NAMES, w.environment) ? ENV_NAMES[w.environment] : w.environment) || '—';
+  }
+
+  function tabServer(R) {
+    const s = R.server, sys = R.system;
+    const players = s.onlinePlayers === null ? '—' : fmtNum(s.onlinePlayers) + (s.maxPlayers !== null ? ' из ' + fmtNum(s.maxPlayers) : '');
+    const sysCard = card({ title: 'Система' }, kv([
+      ['ОС', sys.os],
+      ['Архитектура', sys.arch, true],
+      ['Процессор', sys.cpuModel || 'неизвестно'],
+      ['Логических ядер', fmtNum(sys.logicalCores)],
+      ['ОЗУ машины', sys.totalMemoryBytes ? fmtBytes(sys.totalMemoryBytes) : 'неизвестно'],
+      ['Куча (-Xmx)', fmtBytes(sys.heapMaxBytes)],
+      ['Java', [s.javaVersion, s.javaVendor].filter(Boolean).join(', ')],
+      ['Нагрузка по ядрам', sys.perCore ? 'есть (/proc/stat)' : 'нет'],
+      ['Источник по потокам', sys.perThreadSource === 'proc' ? '/proc (все потоки)' : sys.perThreadSource === 'jmx' ? 'JMX (только Java-потоки)' : sys.perThreadSource],
+    ]));
+    const srvCard = card({ title: 'Сервер' }, kv([
+      ['Платформа', s.brand],
+      ['Сборка', s.version, true],
+      ['Minecraft', s.minecraftVersion, true],
+      ['Игроки', players],
+      ['Начало замера', R.start ? fmtDateTime(R.start) : 'неизвестно'],
+      ['Длительность', fmtDuration(R.durationMs) + ' · ' + R.n + ' ' + plural(R.n, ['замер', 'замера', 'замеров'])],
+      ['Интервал', fmtMs(R.interval)],
+      ['Пул чанков', s.pools.chunkWorkers === null ? '—' : fmtNum(s.pools.chunkWorkers) + ' ' + plural(s.pools.chunkWorkers, ['поток', 'потока', 'потоков'])],
+      ['Пул диска чанков', s.pools.chunkIo === null ? '—' : fmtNum(s.pools.chunkIo) + ' ' + plural(s.pools.chunkIo, ['поток', 'потока', 'потоков'])],
+      ['Сеть (Netty)', s.pools.netty === null ? '—' : fmtNum(s.pools.netty) + ' ' + plural(s.pools.netty, ['поток', 'потока', 'потоков'])],
+    ]));
+    const args = s.jvmArgs;
+    const jvmCard = card({ id: 'jvm', cls: 'jvm-card' }, el('details', { class: 'jvm' }, [
+      el('summary', null, [icon('chevron', 'chev'), 'Аргументы JVM', el('span', { class: 'count-pill', text: String(args.length) })]),
+      args.length ? el('ul', { class: 'jvm-list' }, args.map((a) => el('li', { text: a }))) : el('p', { class: 'empty', text: 'Аргументы не переданы.' }),
+    ]));
+
+    const worlds = s.worlds;
+    const wCard = card({ id: 'worlds', title: 'Миры', desc: 'Состояние на конец замера.' }, [
+      worlds.length ? table([
+        { label: 'Мир', cls: 'name nowrap', render: (w) => [el('span', { class: 'mono', text: w.name }), el('span', { class: 'td-sub', text: envName(w) })] },
+        { label: 'Тип', cls: 'wrap opt', render: (w) => el('span', { class: 'env env-' + (ENV_NAMES[w.environment] ? w.environment.toLowerCase() : 'custom'), text: envName(w) }) },
+        { label: 'Чанки', cls: 'num', render: (w) => fmtNum(w.loadedChunks) },
+        { label: 'Сущности', cls: 'num', render: (w) => fmtNum(w.entities) },
+        { label: 'Блок-сущности', cls: 'num', render: (w) => fmtNum(w.tileEntities) },
+        { label: 'Игроки', cls: 'num', render: (w) => fmtNum(w.players) },
+      ], worlds).wrap : el('p', { class: 'empty', text: 'Список миров не передан.' }),
+    ]);
+    const plugins = s.plugins.slice().sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    const enabled = plugins.filter((p) => p.enabled).length;
+    const pCard = card({ id: 'plugins', title: 'Плагины', desc: plugins.length ? plugins.length + ' ' + plural(plugins.length, ['плагин', 'плагина', 'плагинов']) + ', включено ' + enabled + '.' : null }, [
+      plugins.length ? table([
+        { label: 'Плагин', cls: 'name', render: (p) => p.name },
+        { label: 'Версия', cls: 'wrap mono', render: (p) => p.version || '—' },
+        { label: 'Статус', render: (p) => el('span', { class: 'pill ' + (p.enabled ? 'pill-on' : 'pill-off'), text: p.enabled ? 'включён' : 'выключен' }) },
+      ], plugins).wrap : el('p', { class: 'empty', text: 'Плагинов нет или список не передан.' }),
+    ]);
+    return [el('div', { class: 'grid-2' }, [srvCard, sysCard]), jvmCard, wCard, pCard];
+  }
+
+  // ---------------------------------------------------------------------
+  // Shell: top bar, tabs, routing
+  // ---------------------------------------------------------------------
+
+  const TABS = [
+    { id: 'overview', label: 'Обзор', render: tabOverview },
+    { id: 'cores', label: 'Ядра', render: tabCores },
+    { id: 'threads', label: 'Потоки', render: tabThreads },
+    { id: 'ticks', label: 'Тики', render: tabTicks },
+    { id: 'memory', label: 'Память', render: tabMemory },
+    { id: 'server', label: 'Сервер', render: tabServer },
+  ];
+  // Anchors of the old single-page viewer, so old links still land somewhere sensible.
+  const OLD_ANCHORS = { findings: 'overview', groups: 'threads', main: 'ticks', spikes: 'ticks', worlds: 'server', plugins: 'server', jvm: 'server' };
+
+  /** The loaded report: {key, R, raw, rawText, fileName, shareUrl, findings, tab, panel}. */
+  let current = null;
+
+  function tabFromHash() {
+    const h = (location.hash || '').slice(1);
+    if (TABS.some((t) => t.id === h)) return h;
+    if (Object.prototype.hasOwnProperty.call(OLD_ANCHORS, h)) return OLD_ANCHORS[h];
+    return null;
+  }
 
   function resetView() {
     charts = [];
@@ -1494,98 +2092,229 @@
     window.scrollTo(0, 0);
   }
 
-  function setNav(rawText, fileName) {
-    topnav.textContent = '';
-    topnav.hidden = false;
-    topnav.appendChild(el('a', { class: 'btn btn-small', href: '/', text: 'Другой отчёт' }));
-    if (rawText) {
-      const btn = el('button', { class: 'btn btn-small', type: 'button', text: 'Скачать JSON' });
-      btn.addEventListener('click', () => {
-        const url = URL.createObjectURL(new Blob([rawText], { type: 'application/json' }));
-        const a = el('a', { href: url, download: fileName || 'amazake-profile.json' });
+  function clearShell() {
+    metaBar.textContent = '';
+    metaBar.hidden = true;
+    actionsBar.textContent = '';
+    actionsBar.hidden = true;
+    tabsBar.hidden = true;
+    tabsBar.firstElementChild.textContent = '';
+    document.body.classList.remove('has-report');
+    syncHeadHeight();
+  }
+
+  function showToast(text) {
+    toast.textContent = '';
+    toast.appendChild(icon('check'));
+    toast.appendChild(document.createTextNode(text));
+    toast.hidden = false;
+    clearTimeout(showToast.timer);
+    showToast.timer = setTimeout(() => { toast.hidden = true; }, 2200);
+  }
+
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (e) { /* fall back below */ }
+    const ta = el('textarea', { class: 'offscreen', readonly: true, 'aria-hidden': 'true' });
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+
+  function metaItem(iconName, text, cls) {
+    return el('span', { class: 'meta-item' + (cls ? ' ' + cls : '') }, [icon(iconName), el('span', { text: text })]);
+  }
+
+  function buildShell(R) {
+    const s = R.server;
+    metaBar.textContent = '';
+    const title = (s.brand + ' ' + s.version).trim();
+    metaBar.appendChild(metaItem('server', title + (s.minecraftVersion && s.version.indexOf(s.minecraftVersion) < 0 ? ' · ' + s.minecraftVersion : ''), 'meta-server'));
+    if (R.start) {
+      // Full date on wide screens, compact "11.11 16:30" on phones.
+      const pad2 = (v) => String(v).padStart(2, '0');
+      const d = R.start;
+      const short = pad2(d.getDate()) + '.' + pad2(d.getMonth() + 1) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+      metaBar.appendChild(el('span', { class: 'meta-item', title: fmtDateTime(d) }, [
+        icon('calendar'),
+        el('span', { class: 'when-long', text: d.toLocaleString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) }),
+        el('span', { class: 'when-short', text: short }),
+      ]));
+    }
+    metaBar.appendChild(metaItem('clock', fmtDuration(R.durationMs)));
+    if (s.onlinePlayers !== null) metaBar.appendChild(metaItem('users', fmtNum(s.onlinePlayers) + (s.maxPlayers !== null ? '/' + fmtNum(s.maxPlayers) : '')));
+    metaBar.hidden = false;
+
+    actionsBar.textContent = '';
+    if (current.shareUrl) {
+      const copy = el('button', { class: 'btn btn-small', type: 'button', title: 'Скопировать ссылку на отчёт', 'aria-label': 'Скопировать ссылку' }, [icon('link'), el('span', { class: 'btn-text', text: 'Ссылка' })]);
+      copy.addEventListener('click', async () => {
+        const url = current.shareUrl + '#' + current.tab;
+        if (await copyText(url)) showToast('Ссылка скопирована');
+        else window.prompt('Скопируйте ссылку:', url);
+      });
+      actionsBar.appendChild(copy);
+    }
+    if (current.rawText) {
+      const dl = el('button', { class: 'btn btn-small btn-primary', type: 'button', 'aria-label': 'Скачать JSON' }, [icon('download'), el('span', { class: 'btn-text', text: 'Скачать JSON' })]);
+      dl.addEventListener('click', () => {
+        const url = URL.createObjectURL(new Blob([current.rawText], { type: 'application/json' }));
+        const a = el('a', { href: url, download: current.fileName || 'amazake-profile.json' });
         document.body.appendChild(a);
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       });
-      topnav.appendChild(btn);
+      actionsBar.appendChild(dl);
     }
+    actionsBar.hidden = !actionsBar.childNodes.length;
+
+    const inner = tabsBar.firstElementChild;
+    inner.textContent = '';
+    for (const t of TABS) {
+      const b = el('button', { class: 'tab', type: 'button', role: 'tab', id: 'tab-' + t.id, 'aria-controls': 'panel', 'aria-selected': 'false', tabindex: '-1', text: t.label });
+      b.addEventListener('click', () => setTab(t.id, true));
+      b.addEventListener('keydown', (e) => {
+        const i = TABS.indexOf(t);
+        let j = -1;
+        if (e.key === 'ArrowRight') j = (i + 1) % TABS.length;
+        else if (e.key === 'ArrowLeft') j = (i - 1 + TABS.length) % TABS.length;
+        else if (e.key === 'Home') j = 0;
+        else if (e.key === 'End') j = TABS.length - 1;
+        if (j < 0) return;
+        e.preventDefault();
+        setTab(TABS[j].id, true);
+        document.getElementById('tab-' + TABS[j].id).focus();
+      });
+      inner.appendChild(b);
+    }
+    tabsBar.hidden = false;
+    document.body.classList.add('has-report');
+    syncHeadHeight();
+    updateFades();
   }
 
-  function renderReport(raw, rawText, fileName) {
+  function setTab(id, updateUrl) {
+    if (!current) return;
+    if (!TABS.some((t) => t.id === id)) id = 'overview';
+    const same = current.tab === id && current.panel.childNodes.length;
+    current.tab = id;
+    if (updateUrl && location.hash !== '#' + id) {
+      history.replaceState(null, '', location.pathname + location.search + '#' + id);
+    }
+    for (const t of TABS) {
+      const b = document.getElementById('tab-' + t.id);
+      if (!b) continue;
+      const on = t.id === id;
+      b.setAttribute('aria-selected', String(on));
+      b.tabIndex = on ? 0 : -1;
+      if (on && b.scrollIntoView && tabsBar.firstElementChild.scrollWidth > tabsBar.firstElementChild.clientWidth) {
+        b.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
+    }
+    if (same) return;
+    const tab = TABS.find((t) => t.id === id);
+    charts = [];
+    hideTip();
+    const panel = current.panel;
+    panel.setAttribute('aria-labelledby', 'tab-' + id);
+    panel.textContent = '';
+    for (const node of safeSection(tab.render, current.R)) panel.appendChild(node);
+    drawAllCharts(true);
+    if (window.scrollY > 0) window.scrollTo(0, 0);
+  }
+
+  function renderReport(raw, rawText, fileName, key, shareUrl) {
     resetView();
+    clearShell();
+    current = null;
     if (!isObj(raw)) {
-      showError('Это не отчёт профайлера', 'Файл не содержит JSON-объект отчёта Amazake.', true);
+      showError('Это не отчёт профайлера', 'Файл не содержит JSON-объект отчёта Amazake.');
       return;
     }
     const looksLikeReport = raw.format === 'amazake-profile' || Array.isArray(raw.samples) || isObj(raw.server);
     if (!looksLikeReport) {
-      showError('Это не отчёт профайлера', 'В JSON нет полей отчёта Amazake (format "amazake-profile"). Возможно, выбран не тот файл.', true);
+      showError('Это не отчёт профайлера', 'В JSON нет полей отчёта Amazake (format "amazake-profile"). Возможно, выбран не тот файл.');
       return;
     }
-    setNav(rawText, fileName);
+    const R = normalize(raw);
+    let findings;
+    try { findings = computeFindings(R); } catch (e) {
+      if (window.console && console.warn) console.warn('amazake viewer: findings failed', e);
+      findings = [{ severity: 'info', title: 'Не удалось рассчитать выводы', text: 'В отчёте не хватает данных для автоматических подсказок. Графики на вкладках доступны.' }];
+    }
+    current = { key: key, R: R, raw: raw, rawText: rawText, fileName: fileName, shareUrl: shareUrl, findings: findings, tab: null, panel: null };
+    document.title = (R.server.brand + ' ' + R.server.version).trim() + ' — Amazake profiler';
+    buildShell(R);
+
     if (raw.format !== 'amazake-profile') {
       app.appendChild(noticeEl('warn', 'Формат не распознан', 'Поле format не равно "amazake-profile". Показываем то, что удалось прочитать.'));
     } else if (raw.version !== 1) {
       app.appendChild(noticeEl('warn', 'Другая версия формата', 'Отчёт версии ' + str(raw.version, '?') + ', а просмотрщик знает версию 1. Часть данных может отображаться неверно.'));
     }
-
-    const R = normalize(raw);
-    document.title = (R.server.brand + ' ' + R.server.version).trim() + ' — Amazake Профайлер';
-
-    const parts = [];
-    parts.push(...safeSection(sectionHeader, R));
-    parts.push(toc());
-    parts.push(...safeSection(sectionFindings, R));
-    parts.push(...safeSection(sectionCores, R));
-    parts.push(...safeSection(sectionGroups, R));
-    parts.push(...safeSection(sectionMain, R));
-    parts.push(...safeSection(sectionTicks, R));
-    parts.push(...safeSection(sectionMemory, R));
-    parts.push(...safeSection(sectionThreads, R));
-    parts.push(...safeSection(sectionPluginsWorlds, R));
-    parts.push(el('p', { class: 'footer-note', text: 'Отчёт обработан в вашем браузере. Формат amazake-profile, версия ' + str(raw.version, '?') + '.' }));
-    for (const p of parts) app.appendChild(p);
-    drawAllCharts(true);
-    if (location.hash && location.hash.length > 1) {
-      const target = document.getElementById(location.hash.slice(1));
-      if (target) target.scrollIntoView();
-    }
+    current.panel = el('div', { id: 'panel', class: 'panel', role: 'tabpanel', tabindex: '-1' });
+    app.appendChild(current.panel);
+    app.appendChild(el('p', { class: 'footer-note', text: 'Отчёт обработан в вашем браузере. Формат amazake-profile, версия ' + str(raw.version, '?') + '.' }));
+    setTab(tabFromHash() || 'overview', true);
   }
 
-  function noticeEl(kind, title, text) {
-    return el('div', { class: 'notice ' + kind, role: kind === 'error' ? 'alert' : null }, [
-      el('p', { class: 'notice-title', text: title }),
-      text ? el('p', { text: text }) : null,
-    ]);
-  }
-
-  function showError(title, text, withBack) {
+  function showError(title, text, opts) {
     resetView();
-    topnav.hidden = true;
-    app.appendChild(el('div', { class: 'start' }, [
-      noticeEl('error', title, text),
-      withBack ? el('a', { class: 'btn', href: '/', text: 'На главную' }) : null,
+    clearShell();
+    current = null;
+    document.title = 'Amazake profiler';
+    const actions = el('div', { class: 'error-actions' });
+    // Retry is the expected action when there is one; otherwise going home is.
+    const canRetry = !!(opts && opts.retry);
+    if (canRetry) {
+      const retry = el('button', { class: 'btn btn-primary', type: 'button', text: 'Повторить' });
+      retry.addEventListener('click', opts.retry);
+      actions.appendChild(retry);
+    }
+    actions.appendChild(el('a', { class: 'btn' + (canRetry ? '' : ' btn-primary'), href: '/' }, [icon('back'), 'На главную']));
+    app.appendChild(el('div', { class: 'center-card error-card', role: 'alert' }, [
+      el('div', { class: 'error-icon' }, icon(opts && opts.kind === 'notfound' ? 'search' : 'warning')),
+      el('h1', { text: title }),
+      el('p', { class: 'lead', text: text }),
+      actions,
     ]));
   }
 
   function showLoading(text) {
     resetView();
-    app.appendChild(el('p', { class: 'loading', text: text }));
+    clearShell();
+    current = null;
+    const sk = el('div', { class: 'skeleton', 'aria-busy': 'true', 'aria-live': 'polite' }, [
+      el('p', { class: 'loading-text' }, [el('span', { class: 'spinner', 'aria-hidden': 'true' }), text]),
+    ]);
+    const grid = el('div', { class: 'widgets' });
+    for (let i = 0; i < 8; i++) grid.appendChild(el('div', { class: 'widget sk-block' }));
+    sk.appendChild(grid);
+    sk.appendChild(el('div', { class: 'card sk-block sk-tall' }));
+    app.appendChild(sk);
   }
 
   function showStart(message) {
     resetView();
-    topnav.hidden = true;
-    topnav.textContent = '';
-    document.title = 'Amazake Профайлер';
+    clearShell();
+    current = null;
+    document.title = 'Amazake profiler';
 
-    const status = el('div', { 'aria-live': 'polite' });
+    const status = el('div', { class: 'start-status', 'aria-live': 'polite' });
     if (message) status.appendChild(noticeEl('error', message.title, message.text));
 
     const fileInput = el('input', { type: 'file', accept: '.json,.gz,application/json', hidden: true });
-    const pick = el('button', { class: 'btn btn-primary', type: 'button', text: 'Выбрать файл' });
+    const pick = el('button', { class: 'btn btn-primary', type: 'button' }, [icon('file'), 'Выбрать файл']);
     const zone = el('div', { class: 'dropzone', tabindex: '0', role: 'button', 'aria-label': 'Открыть файл отчёта' }, [
+      el('div', { class: 'dz-icon' }, icon('upload')),
       el('p', { class: 'dropzone-title', text: 'Перетащите сюда файл отчёта .json' }),
       el('p', { class: 'dropzone-hint', text: 'Файл не загружается на сервер: он открывается прямо в браузере.' }),
       pick,
@@ -1605,9 +2334,10 @@
       if (f) openFile(f, status);
     });
 
-    const linkInput = el('input', { class: 'input', type: 'text', placeholder: 'Ссылка на отчёт (…/r/aB3xY9kQ2m) или его id', 'aria-label': 'Ссылка или id отчёта', autocomplete: 'off', spellcheck: 'false' });
-    const go = el('button', { class: 'btn', type: 'submit', text: 'Открыть' });
-    const form = el('form', { class: 'start-row' }, [linkInput, go]);
+    const linkInput = el('input', { class: 'input', type: 'text', placeholder: 'Ссылка или id отчёта', 'aria-label': 'Ссылка или id отчёта', autocomplete: 'off', spellcheck: 'false' });
+    const go = el('button', { class: 'btn', type: 'submit' }, ['Открыть', icon('arrow')]);
+    const form = el('form', { class: 'start-row' }, [el('label', { class: 'search link-field' }, [icon('link'), linkInput]), go]);
+    const formHint = el('p', { class: 'field-hint' }, ['Например, ', el('span', { class: 'mono', text: 'https://…/r/aB3xY9kQ2m' }), ' или просто ', el('span', { class: 'mono', text: 'aB3xY9kQ2m' })]);
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       const id = parseReportRef(linkInput.value);
@@ -1616,26 +2346,41 @@
         status.appendChild(noticeEl('error', 'Не понимаю ссылку', 'Вставьте ссылку вида https://сайт/r/aB3xY9kQ2m или только id отчёта (латинские буквы и цифры).'));
         return;
       }
-      location.assign('/r/' + id);
+      // A copied link carries the tab (…/r/id#memory): keep it.
+      const hm = /#([A-Za-z]+)\s*$/.exec(linkInput.value);
+      const h = hm && (TABS.some((t) => t.id === hm[1]) || Object.prototype.hasOwnProperty.call(OLD_ANCHORS, hm[1])) ? '#' + hm[1] : '';
+      location.assign('/r/' + id + h);
     });
 
-    const sample = el('button', { class: 'btn', type: 'button', text: 'Открыть пример' });
+    const sample = el('button', { class: 'btn btn-ghost', type: 'button' }, ['Открыть пример', icon('arrow')]);
     sample.addEventListener('click', () => {
       history.pushState(null, '', '/?sample');
       loadSample();
     });
 
+    const steps = el('ol', { class: 'steps' }, [
+      el('li', null, [el('span', { class: 'step-n', text: '1' }), el('div', null, [el('b', null, el('code', { text: '/amazake profile' })), el('span', { text: 'на сервере — замер нагрузки за 30–60 секунд' })])]),
+      el('li', null, [el('span', { class: 'step-n', text: '2' }), el('div', null, [el('b', { text: 'Ссылка на отчёт' }), el('span', { text: 'сервер пришлёт её в чат или консоль' })])]),
+      el('li', null, [el('span', { class: 'step-n', text: '3' }), el('div', null, [el('b', { text: 'Разбор здесь' }), el('span', { text: 'TPS, ядра, потоки, память и подсказки' })])]),
+    ]);
+
     app.appendChild(el('div', { class: 'start' }, [
-      el('h1', { text: 'Отчёты профайлера Amazake' }),
-      el('p', { class: 'lead', text: 'Здесь видно, чем занят процессор сервера: главный поток, чанки, сеть, сборщик мусора, плагины — и что с этим делать.' }),
-      status,
-      zone,
-      form,
-      el('div', { class: 'start-sep', text: 'или' }),
-      el('div', { class: 'start-sample' }, sample),
+      el('div', { class: 'hero' }, [
+        el('img', { class: 'hero-logo', src: '/favicon.svg', alt: '', width: '56', height: '56' }),
+        el('h1', null, ['Amazake ', el('span', { class: 'accent-text', text: 'profiler' })]),
+        el('p', { class: 'lead', text: 'Показывает, чем занят процессор сервера: главный поток, чанки, сеть, сборщик мусора, плагины — и что с этим делать.' }),
+      ]),
+      steps,
+      el('div', { class: 'center-card' }, [
+        status,
+        zone,
+        el('div', { class: 'start-sep', text: 'или откройте по ссылке' }),
+        form,
+        formHint,
+        el('div', { class: 'start-sample' }, [el('span', { class: 'muted', text: 'Нет отчёта под рукой?' }), sample]),
+      ]),
       el('p', { class: 'start-help' }, [
-        'Отчёт создаётся на сервере командой ', el('code', { text: '/amazake profile' }),
-        '. Если загрузка на сайт включена, сервер пришлёт ссылку; иначе файл отчёта лежит в папке сервера — его можно открыть здесь.',
+        'Если загрузка на сайт выключена, файл отчёта лежит в папке сервера — его можно открыть здесь. Отчёты на сайте хранятся 30 дней.',
       ]),
     ]));
   }
@@ -1687,8 +2432,8 @@
       status.appendChild(noticeEl('error', 'Файл не является JSON', 'Откройте файл отчёта, который создала команда /amazake profile (обычно с расширением .json).'));
       return;
     }
-    history.pushState(null, '', '/#file');
-    renderReport(raw, text, file.name);
+    history.pushState(null, '', '/?file');
+    renderReport(raw, text, file.name, 'file', null);
   }
 
   async function fetchReport(url, notFoundText) {
@@ -1696,18 +2441,18 @@
     try {
       res = await fetch(url, { headers: { Accept: 'application/json' }, cache: 'no-store' });
     } catch (e) {
-      return { error: ['Нет связи с сайтом', 'Не удалось загрузить отчёт. Проверьте подключение к интернету и обновите страницу.'] };
+      return { error: ['Нет связи с сайтом', 'Не удалось загрузить отчёт. Проверьте подключение к интернету и попробуйте ещё раз.'], retry: true };
     }
     if (!res.ok) {
       try { await res.text(); } catch (e) { /* only drains the error body */ }
     }
-    if (res.status === 404) return { error: ['Отчёт не найден', notFoundText] };
-    if (!res.ok) return { error: ['Сайт ответил ошибкой ' + res.status, 'Попробуйте обновить страницу чуть позже.'] };
+    if (res.status === 404) return { error: ['Отчёт не найден или устарел (хранится 30 дней)', notFoundText], notFound: true };
+    if (!res.ok) return { error: ['Сайт ответил ошибкой ' + res.status, 'Попробуйте обновить страницу чуть позже.'], retry: true };
     let text;
     try {
       text = await res.text();
     } catch (e) {
-      return { error: ['Загрузка прервалась', 'Соединение оборвалось во время загрузки отчёта. Обновите страницу.'] };
+      return { error: ['Загрузка прервалась', 'Соединение оборвалось во время загрузки отчёта.'], retry: true };
     }
     try {
       return { raw: parseJsonText(text), text: text };
@@ -1716,38 +2461,111 @@
     }
   }
 
+  let loadSeq = 0;
+
   async function loadRemote(id) {
+    const seq = ++loadSeq;
     showLoading('Загружаем отчёт…');
     const r = await fetchReport('/api/reports/' + encodeURIComponent(id),
-      'Отчёта с id «' + id + '» нет: ссылка неверная или срок хранения отчёта истёк. Снимите новый профиль командой /amazake profile.');
-    if (r.error) { showError(r.error[0], r.error[1], true); return; }
-    renderReport(r.raw, r.text, 'amazake-' + id + '.json');
+      'Отчёта с id «' + id + '» нет: ссылка неверная или срок хранения истёк. Снимите новый профиль командой /amazake profile.');
+    if (seq !== loadSeq) return;
+    if (r.error) { showError(r.error[0], r.error[1], { kind: r.notFound ? 'notfound' : null, retry: r.retry ? () => loadRemote(id) : null }); return; }
+    renderReport(r.raw, r.text, 'amazake-' + id + '.json', 'r:' + id, location.origin + '/r/' + id);
   }
 
   async function loadSample() {
+    const seq = ++loadSeq;
     showLoading('Загружаем пример…');
     const r = await fetchReport('/sample-report.json', 'Файл примера не найден на сайте.');
-    if (r.error) { showError(r.error[0], r.error[1], true); return; }
-    renderReport(r.raw, r.text, 'amazake-sample.json');
+    if (seq !== loadSeq) return;
+    if (r.error) { showError(r.error[0], r.error[1], { retry: r.retry ? loadSample : null }); return; }
+    renderReport(r.raw, r.text, 'amazake-sample.json', 'sample', location.origin + '/?sample');
   }
 
   function route() {
+    hideTip();
     const path = location.pathname;
+    const tab = tabFromHash();
     const m = /^\/r\/([^/]*)\/?$/.exec(path);
+    let key = null;
     if (m) {
       let id = '';
       try { id = decodeURIComponent(m[1]); } catch (e) { id = ''; }
       if (!ID_RE.test(id)) {
-        showError('Неверная ссылка', 'Id отчёта состоит только из латинских букв и цифр. Проверьте ссылку.', true);
+        loadSeq++;
+        showError('Неверная ссылка', 'Id отчёта состоит только из латинских букв и цифр. Проверьте ссылку.', { kind: 'notfound' });
         return;
       }
+      key = 'r:' + id;
+      if (current && current.key === key) { setTab(tab || current.tab, false); return; }
       loadRemote(id);
       return;
     }
-    if (location.search === '?sample') { loadSample(); return; }
+    if (location.search === '?sample') {
+      if (current && current.key === 'sample') { setTab(tab || current.tab, false); return; }
+      loadSample();
+      return;
+    }
+    if (location.search === '?file' && current && current.key === 'file') { setTab(tab || current.tab, false); return; }
+    loadSeq++;
     showStart();
   }
 
+  // Theme: dark for everyone by default; light only when the viewer picks it.
+  const THEME_KEY = 'amazake-theme';
+  const themeBtn = document.getElementById('theme-toggle');
+  function storedTheme() {
+    try { return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'; } catch (e) { return 'dark'; }
+  }
+  function applyTheme(theme) {
+    if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else document.documentElement.removeAttribute('data-theme');
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', theme === 'light' ? '#ffffff' : '#0d1117');
+    const cs = document.querySelector('meta[name="color-scheme"]');
+    if (cs) cs.setAttribute('content', theme);
+    if (themeBtn) {
+      const label = theme === 'light' ? 'Тёмная тема' : 'Светлая тема';
+      themeBtn.textContent = '';
+      themeBtn.appendChild(icon(theme === 'light' ? 'moon' : 'sun'));
+      themeBtn.setAttribute('aria-label', label);
+      themeBtn.title = label;
+    }
+  }
+  applyTheme(storedTheme());
+  if (themeBtn) {
+    themeBtn.addEventListener('click', () => {
+      const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* not saved, still applied */ }
+      applyTheme(next);
+      hideTip();
+    });
+  }
+
+  // Edge fades on horizontal scrollers (tab strip, meta chips) so it is visible they scroll.
+  const fadeEls = [tabsBar.firstElementChild, metaBar];
+  function updateFades() {
+    for (const e of fadeEls) {
+      const max = e.scrollWidth - e.clientWidth;
+      e.classList.toggle('fade-l', max > 1 && e.scrollLeft > 1);
+      e.classList.toggle('fade-r', max > 1 && e.scrollLeft < max - 1);
+    }
+  }
+  for (const e of fadeEls) e.addEventListener('scroll', updateFades, { passive: true });
+  window.addEventListener('resize', updateFades);
+
+  // Header height drives the sticky offsets below it (side card on «Обзор»).
+  const shellHead = document.querySelector('.shell-head');
+  function syncHeadHeight() {
+    if (shellHead) document.documentElement.style.setProperty('--head-h', shellHead.offsetHeight + 'px');
+  }
+  window.addEventListener('resize', syncHeadHeight);
+
   window.addEventListener('popstate', route);
+  window.addEventListener('hashchange', () => {
+    const tab = tabFromHash();
+    if (current && tab && tab !== current.tab) setTab(tab, false);
+  });
   route();
+  syncHeadHeight();
 })();
