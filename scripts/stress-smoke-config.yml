@@ -1,0 +1,200 @@
+# AmazakeStress config for the CI smoke test (scripts/smoke-test.sh): every module on, at tiny intensities,
+# with short stages, so "/stress run 40" walks the whole timeline in 40 s on a CI runner.
+# Every key is set on purpose: a key left out falls back to the heavy defaults of the plugin's own config.yml.
+# The smoke test replaces profiler.upload-url with the local site it starts.
+config-version: 1
+
+world:
+  seed: 20261111
+  type: FLAT
+  generator-settings: ""
+  build-y: auto
+  recreate-on-start: true
+  difficulty: NORMAL
+  time: 6000
+  auto-save: false
+  gamerules:
+    spawn_mobs: false
+    spawn_monsters: false
+    spawn_patrols: false
+    spawn_phantoms: false
+    spawn_wandering_traders: false
+    spawn_wardens: false
+    raids: false
+    advance_time: false
+    advance_weather: false
+    random_tick_speed: 3
+    mob_griefing: false
+    mob_drops: false
+    max_entity_cramming: 0
+    fire_spread_radius_around_player: 0
+    send_command_feedback: true
+    show_death_messages: false
+    show_advancement_messages: false
+
+timeline:
+  total-seconds: 40
+  stages:
+    baseline: 4
+    mobs: 4
+    physics: 4
+    redstone: 4
+    chunks: 4
+    packets: 4
+  min-max-stage-seconds: 10
+  max-stage-multiplier: 1.5
+
+status:
+  log-interval-seconds: 5
+  broadcast-stage-changes: true
+  save-results: true
+
+profiler:
+  auto-start-with-run: false
+  upload-url: "http://127.0.0.1:18787"
+  upload-token: ""
+  interval-ms: 1000
+  max-seconds: 600
+
+modules:
+  mobs:
+    enabled: true
+    count: 40
+    spawn-per-tick: 5
+    build-blocks-per-tick: 4000
+    mix:
+      zombie: 18
+      skeleton: 12
+      villager: 10
+      iron-golem: 2
+      farm: 26
+      bee: 6
+      piglin: 8
+      crammed: 18
+    pens:
+      zombie: 1
+      skeleton: 1
+      village: 1
+      farm: 1
+      bee: 1
+      piglin: 1
+      crammed: 1
+    pen-size: 12
+    wall-height: 3
+    crammed-pen-size: 3
+    farm-animals: [COW, SHEEP, CHICKEN, PIG]
+    crammed-animals: [COW, SHEEP]
+    retarget-interval-ticks: 40
+    retarget-share: 0.5
+    retarget-speed: 1.0
+    breed-interval-ticks: 100
+    max-babies: 10
+
+  physics:
+    enabled: true
+    build-blocks-per-tick: 4000
+    falling:
+      columns: 16
+      column-height: 8
+      drop-height: 4
+      interval-ticks: 60
+      materials: [SAND, GRAVEL]
+    items:
+      per-burst: 40
+      interval-ticks: 40
+      lifetime-ticks: 100
+      per-cluster: 8
+      materials: [COBBLESTONE, DIRT]
+    xp:
+      orbs-per-burst: 20
+      interval-ticks: 40
+      lifetime-ticks: 100
+    fluids:
+      sources: 4
+      lava-share: 0.25
+      on-ticks: 40
+      off-ticks: 20
+    arrows:
+      dispensers: 4
+      interval-ticks: 20
+      range: 8
+    tnt:
+      enabled: true
+      per-wave: 4
+      interval-ticks: 60
+      fuse-ticks: 20
+      yield: 1.0
+
+  redstone:
+    enabled: true
+    clocks: 4
+    clock-length: 24
+    clock-ring-delay: 1
+    line-repeater-delay: 1
+    piston-walls: 2
+    piston-wall-length: 16
+    piston-clock-delay: 2
+    hopper-chains: 2
+    hopper-chain-length: 6
+    items-per-chain: 32
+    hopper-line-length: 8
+    hopper-dropper-clock: true
+    minecart-loops: 1
+    minecart-loop-size: 8
+    minecarts-per-loop: 4
+    minecart-speed: 0.4
+    blocks-per-tick: 4000
+    clear-before-build: true
+    max-stage-extra: true
+
+  chunks:
+    enabled: true
+    ring-radius: 3
+    chunks-per-tick: 4
+    max-concurrent: 16
+    move-interval-ticks: 40
+    move-step-chunks: 2
+    max-side-shift: 2
+    releases-per-tick: 16
+    generate: true
+    urgent: false
+
+  packets:
+    enabled: true
+    teleport-players: true
+    max-players: 1
+    particle-packets-per-tick: 10
+    particles-per-packet: 4
+    sounds-per-tick: 2
+    block-changes-per-tick: 100
+    single-block-changes-per-tick: 10
+    action-bar: true
+    boss-bars: 2
+    teams: 4
+    team-updates-per-tick: 2
+    sidebar-lines: 4
+    world-block-toggles-per-tick: 32
+    moving-entities: 20
+    entity-updates-per-tick: 10
+    entity-moves-per-tick: 20
+    world-particle-bursts-per-tick: 2
+    world-particles-per-burst: 10
+    build-blocks-per-tick: 4096
+    spawn-per-tick: 10
+
+  async:
+    enabled: true
+    scheduler-tasks: 2
+    scheduler-period-ticks: 2
+    hash-kib-per-run: 4
+    json-objects-per-run: 4
+    sort-size-per-run: 1000
+    file-writers: 1
+    file-write-interval-ticks: 20
+    threads: 1
+    worker-sleep-ms: 20
+    chunk-snapshots-per-second: 4
+    sync-callbacks-per-tick: 4
+    sync-tasks: 1
+    sync-ms-per-task: 0.2
+    sync-max-ms-total: 1.0

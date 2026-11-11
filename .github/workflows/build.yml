@@ -55,13 +55,28 @@ jobs:
           echo "Built $jar"
           unzip -p "$jar" META-INF/MANIFEST.MF || true
 
-      - name: Smoke test (start, commands, stop)
-        run: scripts/smoke-test.sh amazake-server/build/libs/amazake-paperclip-*-mojmap.jar
+      - name: Build the AmazakeStress plugin (stress-plugin/, public Paper API only)
+        run: |
+          ./gradlew -p stress-plugin build --stacktrace --no-daemon
+          ls -l stress-plugin/build/libs/
+          unzip -p stress-plugin/build/libs/AmazakeStress-*.jar plugin.yml
+
+      - name: Smoke test (start, commands, /stress run 40 with the plugin, stop)
+        run: |
+          scripts/smoke-test.sh amazake-server/build/libs/amazake-paperclip-*-mojmap.jar \
+            "$(ls stress-plugin/build/libs/AmazakeStress-*.jar)"
 
       - uses: actions/upload-artifact@v4
         with:
           name: amazake-${{ github.run_number }}
           path: amazake-server/build/libs/amazake-paperclip-*-mojmap.jar
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amazake-stress-${{ github.run_number }}
+          path: stress-plugin/build/libs/AmazakeStress-*.jar
+          if-no-files-found: error
           retention-days: 30
 
       - name: Publish the build as a release (main only)
@@ -72,7 +87,10 @@ jobs:
           jar=$(ls amazake-server/build/libs/amazake-paperclip-*-mojmap.jar)
           name="amazake-1.21.11-${{ github.run_number }}.jar"
           cp "$jar" "$name"
-          gh release create "build-${{ github.run_number }}" "$name" \
+          # The stress plugin rides along: AmazakeStress-<version>.jar runs on any Paper 1.21.11 fork (Leaf too).
+          stress=$(ls stress-plugin/build/libs/AmazakeStress-*.jar)
+          cp "$stress" .
+          gh release create "build-${{ github.run_number }}" "$name" "$(basename "$stress")" \
             --target "$GITHUB_SHA" \
             --title "Amazake 1.21.11 #${{ github.run_number }}" \
             --notes "Built from ${GITHUB_SHA::7}: $(git log -1 --format=%s)" \

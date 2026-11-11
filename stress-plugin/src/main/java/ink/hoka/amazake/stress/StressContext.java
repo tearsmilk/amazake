@@ -246,14 +246,14 @@ public final class StressContext {
     }
 
     /** Registers a resource (thread pool, ...) closed on stop, in reverse registration order. */
-    public synchronized <T extends AutoCloseable> T onStop(T closeable) {
+    public synchronized <T extends AutoCloseable> T closeOnStop(T closeable) {
         this.closers.push(closeable);
         return closeable;
     }
 
     /** Registers an action run on stop (main thread), in reverse registration order. */
     public void onStop(Runnable action) {
-        this.onStop((AutoCloseable) action::run);
+        this.closeOnStop((AutoCloseable) action::run);
     }
 
     private Runnable guard(Runnable task) {

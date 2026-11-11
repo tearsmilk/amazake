@@ -10,7 +10,7 @@ folia-supported: false
 commands:
   stress:
     description: Управление стресс-тестом AmazakeStress
-    usage: /stress <start|stop|status|cleanup|profile>
+    usage: /stress <start|run|stop|status|cleanup|profile>
     permission: stress.admin
 permissions:
   stress.admin:
