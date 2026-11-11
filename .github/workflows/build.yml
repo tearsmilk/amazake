@@ -1,0 +1,52 @@
+name: Build Amazake
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # A PR from this repository is already built by its push.
+    if: ${{ github.event_name != 'pull_request' || github.repository != github.event.pull_request.head.repo.full_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Git user (paperweight applies patches as commits)
+        run: git config --global user.email "actions@github.com" && git config --global user.name "GitHub Actions"
+
+      - name: Apply patches
+        run: ./gradlew applyAllPatches --stacktrace --no-daemon
+
+      - name: Patch tasks (for the README)
+        run: ./gradlew tasks --all --no-daemon | grep -iE "^(apply|rebuild|fixup)[A-Za-z]* " || true
+
+      - name: Build the server jar
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./gradlew createMojmapPaperclipJar --stacktrace --no-daemon
+
+      - name: The jar says it is Amazake
+        run: |
+          jar=$(ls amazake-server/build/libs/amazake-paperclip-*-mojmap.jar)
+          echo "Built $jar"
+          unzip -p "$jar" META-INF/MANIFEST.MF || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amazake-${{ github.run_number }}
+          path: amazake-server/build/libs/amazake-paperclip-*-mojmap.jar
+          retention-days: 30

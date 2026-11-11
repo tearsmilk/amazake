@@ -1,0 +1,23 @@
+# OS and editors
+.DS_Store
+*~
+.*.sw[a-p]
+*.iml
+.idea
+.vscode
+
+# Gradle
+!gradle/wrapper/gradle-wrapper.jar
+.gradle
+build
+
+# Made by paperweight from Paper + our patches (applyAllPatches): never committed
+build-data/dev-imports.txt
+amazake-api/build.gradle.kts
+amazake-server/build.gradle.kts
+amazake-server/src/minecraft
+paper-api
+paper-server
+
+# Test server
+run

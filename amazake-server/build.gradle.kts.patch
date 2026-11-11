@@ -1,0 +1,84 @@
+--- a/paper-server/build.gradle.kts
++++ b/paper-server/build.gradle.kts
+@@ -22,6 +22,19 @@
+     minecraftVersion = providers.gradleProperty("mcVersion")
+     gitFilePatches = false
+ 
++    // Amazake start - project setup
++    val amazake = forks.register("amazake") {
++        upstream.patchDir("paperServer") {
++            upstreamPath = "paper-server"
++            excludes = setOf("src/minecraft", "patches", "build.gradle.kts")
++            patchesDir = rootDirectory.dir("amazake-server/paper-patches")
++            outputDir = rootDirectory.dir("paper-server")
++        }
++    }
++
++    activeFork = amazake
++    // Amazake end - project setup
++
+     spigot {
+         enabled = true
+         buildDataRef = "17f77cee7117ab9d6175f088ae8962bfd04e61a9"
+@@ -104,7 +117,22 @@
+     }
+ }
+ 
+-val log4jPlugins = sourceSets.create("log4jPlugins")
++// Amazake start - project setup
++sourceSets {
++    main {
++        java { srcDir("../paper-server/src/main/java") }
++        resources { srcDir("../paper-server/src/main/resources") }
++    }
++    test {
++        java { srcDir("../paper-server/src/test/java") }
++        resources { srcDir("../paper-server/src/test/resources") }
++    }
++}
++
++val log4jPlugins = sourceSets.create("log4jPlugins") {
++    java { srcDir("../paper-server/src/log4jPlugins/java") }
++}
++// Amazake end - project setup
+ configurations.named(log4jPlugins.compileClasspathConfigurationName) {
+     extendsFrom(configurations.compileClasspath.get())
+ }
+@@ -127,7 +155,7 @@
+ }
+ 
+ dependencies {
+-    implementation(project(":paper-api"))
++    implementation(project(":amazake-api")) // Amazake - project setup
+     implementation("ca.spottedleaf:concurrentutil:0.0.8")
+     implementation("org.jline:jline-terminal-ffm:3.27.1") // use ffm on java 22+
+     implementation("org.jline:jline-terminal-jni:3.27.1") // fall back to jni on java 21
+@@ -198,14 +226,14 @@
+         val gitBranch = git.exec(providers, "rev-parse", "--abbrev-ref", "HEAD").get().trim()
+         attributes(
+             "Main-Class" to "org.bukkit.craftbukkit.Main",
+-            "Implementation-Title" to "Paper",
++            "Implementation-Title" to "Amazake", // Amazake - rebrand
+             "Implementation-Version" to implementationVersion,
+             "Implementation-Vendor" to date,
+-            "Specification-Title" to "Paper",
++            "Specification-Title" to "Amazake", // Amazake - rebrand
+             "Specification-Version" to project.version,
+-            "Specification-Vendor" to "Paper Team",
+-            "Brand-Id" to "papermc:paper",
+-            "Brand-Name" to "Paper",
++            "Specification-Vendor" to "Amazake", // Amazake - rebrand
++            "Brand-Id" to "tearsmilk:amazake", // Amazake - rebrand
++            "Brand-Name" to "Amazake", // Amazake - rebrand
+             "Build-Number" to (build ?: ""),
+             "Build-Time" to buildTime.toString(),
+             "Git-Branch" to gitBranch,
+@@ -264,7 +292,7 @@
+     jvmArgumentProviders.add(provider)
+ }
+ 
+-val generatedDir: java.nio.file.Path = layout.projectDirectory.dir("src/generated/java").asFile.toPath()
++val generatedDir: java.nio.file.Path = rootProject.layout.projectDirectory.dir("paper-server/src/generated/java").asFile.toPath() // Amazake - project setup
+ idea {
+     module {
+         generatedSourceDirs.add(generatedDir.toFile())
