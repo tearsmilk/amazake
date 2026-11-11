@@ -10,6 +10,8 @@
 (function () {
   const SVGNS = 'http://www.w3.org/2000/svg';
   const MAX_FILE_BYTES = 64 * 1024 * 1024;
+  const MAX_TIME_MS = 1e9;        // ~11.5 days: anything later in a report is treated as garbage
+  const MAX_INTERVAL_MS = 3600000; // sample interval above one hour is not plausible
   const ID_RE = /^[A-Za-z0-9]{1,64}$/;
 
   const GROUP_NAMES = {
@@ -136,6 +138,8 @@
 
   function fmtNum(x, digits) {
     if (x === null || x === undefined || !isFinite(x)) return '—';
+    // Absurd magnitudes (only in broken reports) would print hundreds of digits.
+    if (Math.abs(x) >= 1e15) return x.toExponential(2).replace('.', ',');
     return x.toLocaleString('ru-RU', { minimumFractionDigits: digits || 0, maximumFractionDigits: digits || 0 });
   }
 
@@ -212,13 +216,20 @@
     const system = isObj(raw.system) ? raw.system : {};
     const samples = arr(raw.samples).filter(isObj);
     const n = samples.length;
+    // Times are only trusted inside a plausible range: absurd values (1e12, 1e25)
+    // would make the time axes useless and can stall tick generation.
     let interval = num(raw.intervalMs, 1000);
-    if (interval <= 0) interval = 1000;
+    if (!(interval > 0) || interval > MAX_INTERVAL_MS) interval = 1000;
+    const rawDuration = num(raw.durationMs, -1);
+    const durationOk = rawDuration >= 0 && rawDuration <= MAX_TIME_MS;
+    const tLimit = Math.min(MAX_TIME_MS, 4 * Math.max(n * interval, durationOk ? rawDuration : 0) + 10 * interval);
 
     const t = [];
     for (let i = 0; i < n; i++) {
-      let v = num(samples[i].t, (i + 1) * interval);
-      if (i > 0 && v <= t[i - 1]) v = t[i - 1] + interval; // keep time strictly increasing
+      const prev = i > 0 ? t[i - 1] : 0;
+      let v = num(samples[i].t, NaN);
+      if (!(v >= 0 && v <= tLimit)) v = i > 0 ? prev + interval : interval;
+      if (i > 0 && v <= prev) v = prev + interval; // keep time strictly increasing
       t.push(v);
     }
 
@@ -249,7 +260,7 @@
       };
     }).sort((a, b) => b.avgCores - a.avgCores);
 
-    const durationMs = num(raw.durationMs, n ? t[n - 1] : 0);
+    const durationMs = durationOk && (rawDuration > 0 || !n) ? rawDuration : (n ? t[n - 1] : 0);
     const threads = arr(raw.threads).filter(isObj).map((th) => {
       const cpuMs = num(th.cpuMs, 0);
       return {
@@ -262,7 +273,7 @@
     }).sort((a, b) => b.avgCores - a.avgCores);
 
     const lagSpikes = arr(raw.lagSpikes).filter(isObj)
-      .map((s) => ({ t: num(s.t, 0), ms: num(s.ms, 0) }))
+      .map((s) => ({ t: clamp(num(s.t, 0), 0, MAX_TIME_MS), ms: Math.max(0, num(s.ms, 0)) }))
       .sort((a, b) => b.ms - a.ms);
 
     let start = null;
@@ -436,11 +447,20 @@
   function timeTicks(t0, t1, pixels) {
     const span = Math.max(1, t1 - t0);
     const maxTicks = Math.max(2, Math.floor(pixels / 64));
+    if (!isFinite(t0) || !isFinite(t1) || !isFinite(span)) return [];
     const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200].map((s) => s * 1000);
-    let step = steps[steps.length - 1];
+    let step = 0;
     for (const s of steps) if (span / s <= maxTicks) { step = s; break; }
+    // Longer than the table covers: grow the step with the span (whole hours).
+    if (!step) step = Math.max(7200000, Math.ceil(niceStep(span / maxTicks) / 3600000) * 3600000);
     const out = [];
-    for (let v = Math.ceil(t0 / step) * step; v <= t1 + 1e-6; v += step) out.push(v);
+    const first = Math.ceil(t0 / step) * step;
+    // Index-based loop: never stalls even if v + step === v, and is hard-capped.
+    for (let k = 0; k <= maxTicks * 2; k++) {
+      const v = first + k * step;
+      if (v > t1 + 1e-6) break;
+      out.push(v);
+    }
     return out;
   }
 
@@ -677,20 +697,47 @@
       const ml = 58, mr = 8, mt = 4, mb = 26;
       const pw = Math.max(40, W - ml - mr);
       const H = mt + rows * cellH + mb;
-      const cw = pw / n;
+      // Long reports have far more samples than pixels: bin samples into at most
+      // ~pw/2 columns (max load per core in the bin) and draw one <path> per colour
+      // class, merging horizontal runs, so the DOM stays small (≤ 11 paths).
+      const cols = Math.max(1, Math.min(n, Math.floor(pw / 2)));
+      const binStart = (c) => Math.floor(c * n / cols);
+      const cw = pw / cols;
+      const cellAt = (c, r) => {
+        let v = null;
+        for (let i = binStart(c), e = binStart(c + 1); i < e; i++) {
+          const s = R.cores[i];
+          const x = s && r < s.length ? s[r] : null;
+          if (x !== null && (v === null || x > v)) v = x;
+        }
+        return v;
+      };
       const root = svg('svg', { viewBox: '0 0 ' + W + ' ' + H, width: W, height: H, role: 'img', 'aria-label': 'Загрузка ядер по времени' });
       const g = svg('g', { 'shape-rendering': 'crispEdges' });
       root.appendChild(g);
-      for (let i = 0; i < n; i++) {
-        const c = R.cores[i];
-        for (let r = 0; r < rows; r++) {
-          const v = c && r < c.length ? c[r] : null;
-          const cls = v === null ? 'hm0' : 'hm' + Math.min(9, Math.floor(v * 10));
-          g.appendChild(svg('rect', {
-            x: (ml + i * cw).toFixed(2), y: mt + r * cellH,
-            width: (cw + 0.6).toFixed(2), height: Math.max(1, cellH - (cellH > 5 ? 1 : 0)), class: cls,
-          }));
+      const paths = new Array(11).fill('');
+      const hCell = Math.max(1, cellH - (cellH > 5 ? 1 : 0));
+      for (let r = 0; r < rows; r++) {
+        const y = mt + r * cellH;
+        let runCls = -1, runStart = 0;
+        for (let c = 0; c <= cols; c++) {
+          let k = -1;
+          if (c < cols) {
+            const v = cellAt(c, r);
+            k = v === null ? 10 : Math.min(9, Math.floor(v * 10));
+          }
+          if (k !== runCls) {
+            if (runCls >= 0) {
+              const x0 = ml + runStart * cw;
+              const w = (c - runStart) * cw + (c === cols ? 0 : 0.6);
+              paths[runCls] += 'M' + x0.toFixed(2) + ' ' + y + 'h' + w.toFixed(2) + 'v' + hCell + 'h' + (-w).toFixed(2) + 'z';
+            }
+            runCls = k; runStart = c;
+          }
         }
+      }
+      for (let k = 0; k < 11; k++) {
+        if (paths[k]) g.appendChild(svg('path', { d: paths[k], class: k === 10 ? 'hm0' : 'hm' + k }));
       }
       const every = Math.max(1, Math.ceil(13 / cellH));
       for (let r = 0; r < rows; r += every) {
@@ -711,17 +758,23 @@
       root.appendChild(hit);
       const onMove = (evt) => {
         const pt = svgPoint(root, evt, W, H);
-        const i = clamp(Math.floor((pt.x - ml) / cw), 0, n - 1);
+        const col = clamp(Math.floor((pt.x - ml) / cw), 0, cols - 1);
         const r = clamp(Math.floor((pt.y - mt) / cellH), 0, rows - 1);
-        outline.setAttribute('x', ml + i * cw); outline.setAttribute('y', mt + r * cellH);
+        outline.setAttribute('x', ml + col * cw); outline.setAttribute('y', mt + r * cellH);
         outline.setAttribute('width', Math.max(2, cw)); outline.setAttribute('height', cellH);
         outline.setAttribute('visibility', 'visible');
-        const c = R.cores[i];
-        const v = c && r < c.length ? c[r] : null;
-        const busy = c ? c.reduce((a, b) => a + b, 0) : null;
-        showTip(evt, 'Ядро ' + r + ' · ' + timeLabel(R, R.t[i]), [
-          { name: 'Загрузка ядра', value: v === null ? 'нет данных' : fmtPct(v) },
-          { name: 'Все ядра в этот момент', value: busy === null ? '—' : fmtCores(busy) },
+        const i0 = binStart(col), i1 = Math.max(i0, binStart(col + 1) - 1);
+        const v = cellAt(col, r);
+        let busy = null;
+        for (let i = i0; i <= i1; i++) {
+          const c = R.cores[i];
+          if (c) { const b = c.reduce((a, x) => a + x, 0); if (busy === null || b > busy) busy = b; }
+        }
+        const binned = i1 > i0;
+        const when = binned ? timeLabel(R, R.t[i0]) + ' — ' + fmtClock(R.t[i1]) : timeLabel(R, R.t[i0]);
+        showTip(evt, 'Ядро ' + r + ' · ' + when, [
+          { name: binned ? 'Загрузка ядра (максимум)' : 'Загрузка ядра', value: v === null ? 'нет данных' : fmtPct(v) },
+          { name: binned ? 'Все ядра (максимум)' : 'Все ядра в этот момент', value: busy === null ? '—' : fmtCores(busy) },
         ]);
       };
       hit.addEventListener('pointermove', onMove);
@@ -1147,7 +1200,7 @@
       valFmt: fmtCores,
       ariaLabel: 'Загрузка машины: сервер и другие процессы',
     })));
-    return card('cores', 'Ядра процессора', 'Каждая строка — логическое ядро, каждый столбец — секунда замера. Чем ярче клетка, тем сильнее загружено ядро (всеми процессами машины).', body);
+    return card('cores', 'Ядра процессора', 'Каждая строка — логическое ядро, каждый столбец — секунда замера (в длинных замерах соседние секунды объединяются, и клетка показывает максимум за них). Чем ярче клетка, тем сильнее загружено ядро (всеми процессами машины).', body);
   }
 
   function sectionGroups(R) {
@@ -1362,23 +1415,27 @@
     return card('threads', 'Потоки', 'Все потоки за время замера, самые нагруженные сверху. График — для 24 самых занятых. ' + src, body);
   }
 
+  function envName(w) {
+    return (Object.prototype.hasOwnProperty.call(ENV_NAMES, w.environment) ? ENV_NAMES[w.environment] : w.environment) || '—';
+  }
+
   function sectionPluginsWorlds(R) {
     const plugins = R.server.plugins.slice().sort((a, b) => a.name.localeCompare(b.name, 'ru'));
     const pCard = card('plugins', 'Плагины', plugins.length ? plugins.length + ' ' + plural(plugins.length, ['плагин', 'плагина', 'плагинов']) : null, [
       plugins.length ? table([
         { label: 'Плагин', cls: 'name', render: (p) => p.name },
-        { label: 'Версия', render: (p) => p.version || '—' },
+        { label: 'Версия', cls: 'wrap', render: (p) => p.version || '—' },
         { label: 'Статус', render: (p) => el('span', { class: p.enabled ? 'status-on' : 'status-off', text: p.enabled ? 'включён' : 'выключен' }) },
       ], plugins).wrap : el('p', { class: 'empty', text: 'Плагинов нет или список не передан.' }),
     ]);
     const worlds = R.server.worlds;
     const wCard = card('worlds', 'Миры', 'Состояние на конец замера.', [
       worlds.length ? table([
-        { label: 'Мир', cls: 'name', render: (w) => w.name },
-        { label: 'Тип', render: (w) => ENV_NAMES[w.environment] || w.environment || '—' },
+        { label: 'Мир', cls: 'name', render: (w) => [w.name, el('span', { class: 'td-sub', text: envName(w) })] },
+        { label: 'Тип', cls: 'wrap opt', render: (w) => envName(w) },
         { label: 'Чанки', cls: 'num', render: (w) => fmtNum(w.loadedChunks) },
         { label: 'Сущности', cls: 'num', render: (w) => fmtNum(w.entities) },
-        { label: 'Блок-сущности', cls: 'num', render: (w) => fmtNum(w.tileEntities) },
+        { label: 'Блок-сущности', cls: 'num opt', render: (w) => fmtNum(w.tileEntities) },
         { label: 'Игроки', cls: 'num', render: (w) => fmtNum(w.players) },
       ], worlds).wrap : el('p', { class: 'empty', text: 'Список миров не передан.' }),
     ]);

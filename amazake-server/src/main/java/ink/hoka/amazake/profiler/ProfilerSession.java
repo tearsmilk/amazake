@@ -89,7 +89,8 @@ final class ProfilerSession implements Runnable {
                 break;
             }
         }
-        return this.build(TimeUnit.NANOSECONDS.toMillis(lastNs - startNs));
+        // At least 1 ms: a stop right after the start must not produce durationMs 0, which the site rejects (400).
+        return this.build(Math.max(1L, TimeUnit.NANOSECONDS.toMillis(lastNs - startNs)));
     }
 
     private void sample(final long elapsedNs, final long tMs) {

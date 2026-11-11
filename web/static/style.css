@@ -507,7 +507,9 @@ th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: upp
 
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-td.name { overflow-wrap: anywhere; min-width: 140px; }
+td.name { overflow-wrap: anywhere; min-width: 140px; max-width: 420px; }
+
+td.wrap { overflow-wrap: anywhere; max-width: 260px; }
 
 td.mono { font-family: var(--mono); font-size: 13px; }
 
@@ -570,6 +572,12 @@ details.jvm summary { cursor: pointer; font-weight: 600; }
   .topbar-nav { flex-wrap: nowrap; }
   .opt { display: none; }
   .td-sub { display: block; }
+  /* Let headers and group names wrap so the number columns stay on screen. */
+  th { white-space: normal; }
+  th.num { white-space: normal; }
+  .group-cell { white-space: normal; }
+  td.name { max-width: 200px; }
+  td.wrap { max-width: 140px; }
 }
 
 @media (max-width: 480px) {

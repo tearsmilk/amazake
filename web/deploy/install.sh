@@ -8,11 +8,14 @@
 #   - system user/group amazake-web
 #   - /opt/amazake-web, /etc/amazake-web, /var/lib/amazake-web
 #   - /etc/systemd/system/amazake-web.service (and only this service is ever restarted)
-#   - one nginx site file of its own (+ symlink), followed by "nginx -t && systemctl reload nginx"
+#   - one nginx site file of its own (+ symlink), followed by "nginx -t && systemctl reload nginx".
+#     The file is named zz-amazake-web.conf so it loads last and never becomes nginx's default
+#     server for a port another site already uses (checked before and after writing it).
 #   - with confirmation: "apt-get install" of nginx and/or certbot when they are missing
 #   - a Let's Encrypt certificate for --domain (certbot certonly --webroot, never edits nginx files)
-# It never upgrades packages, never restarts/stops other services, never touches docker, pm2,
-# the firewall, /etc/hosts, DNS, system Python or other nginx/caddy/apache files.
+# It never upgrades or removes packages, never restarts/stops other services, never enables an
+# nginx it did not install, never touches docker, pm2, the firewall, /etc/hosts, DNS, system Python
+# or other nginx/caddy/apache files.
 
 # SC2001: "sed 's/^/  /'" is used on purpose to indent multi-line output.
 # shellcheck disable=SC2001
@@ -35,6 +38,12 @@ readonly ACME_DIR="$STATE_DIR/acme"
 readonly UNIT_FILE="/etc/systemd/system/amazake-web.service"
 readonly MARKER="managed by amazake-web installer"
 readonly LOCK_DIR="/run/amazake-web-install.lock"
+readonly USER_COMMENT="Amazake profiler site"
+# Our nginx file name: "zz-" makes it load after the owner's sites in the same include folder.
+readonly NGINX_NAME="zz-amazake-web.conf"
+readonly NGINX_LEGACY_NAME="amazake-web.conf"
+# With the stock server_names_hash_bucket_size (64) nginx -t fails for names this long or longer.
+readonly LONG_DOMAIN=48
 PYTHON="/usr/bin/python3"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,8 +59,8 @@ SOURCE_DIR=""
 TOKEN=""
 GENERATE_TOKEN=0
 REMOVE_TOKEN=0
-WANT_HTTPS=1
-FORCE_NO_NGINX=0
+WANT_HTTPS=""        # "" = take from the previous install (default 1)
+FORCE_NO_NGINX=""    # "" = take from the previous install (default 0)
 DRY_RUN=0
 ASSUME_YES=0
 RETENTION_DAYS=""
@@ -74,8 +83,13 @@ NEED_APT=()           # packages to apt-get install
 NGINX_INSTALLED=0
 NGINX_ACTIVE=0
 NGINX_START=0         # nginx installed but stopped, nothing on 80/443: start it
+NGINX_ENABLED=""      # systemctl is-enabled nginx (enabled | disabled | masked | ...)
+NGINX_FROM_APT=0      # this run apt-installed nginx (only then we may enable it)
 NGINX_SITE=""
 NGINX_LINK=""
+LEGACY_NGINX=()       # our files under the old name amazake-web.conf (removed on apply)
+USER_OURS=0           # amazake-web user exists and was created by this installer
+CREATED_USER=0        # value written to install.conf
 HAVE_V6=0
 CERT_EXISTS=0
 CERTBOT_BIN=""
@@ -83,6 +97,7 @@ PREV_DOMAIN=""
 PREV_PORT=""
 PREV_NGINX_SITE=""
 PREV_NGINX_LINK=""
+PREV_CHOICES=()       # options remembered from the previous install, for the message
 
 # Progress for the error trap
 DONE_STEPS=()
@@ -138,8 +153,13 @@ usage() {
 Параметры:
   --email ПОЧТА         почта для Let's Encrypt (нужна для HTTPS)
   --no-https            не получать сертификат, только HTTP
+  --https               вернуть HTTPS, если прошлая установка была с --no-https
   --port ПОРТ           внутренний порт сайта на 127.0.0.1 (по умолчанию 8787)
   --no-nginx            не трогать nginx вообще, только поставить сервис сайта
+  --nginx               снова разрешить nginx, если прошлая установка была с --no-nginx
+
+  При повторном запуске --email, --no-https, --no-nginx, порт, срок хранения и лимит
+  берутся из прошлой установки, если их не указать.
   --token ТОКЕН         включить токен для загрузки отчётов (записать этот токен)
   --generate-token      создать случайный токен, если его ещё нет (показывается один раз)
   --remove-token        отключить токен (загрузка без токена)
@@ -232,7 +252,9 @@ parse_args() {
             --generate-token)  GENERATE_TOKEN=1; shift ;;
             --remove-token)    REMOVE_TOKEN=1; shift ;;
             --no-https)        WANT_HTTPS=0; shift ;;
+            --https)           WANT_HTTPS=1; shift ;;
             --no-nginx)        FORCE_NO_NGINX=1; shift ;;
+            --nginx)           FORCE_NO_NGINX=0; shift ;;
             --dry-run)         DRY_RUN=1; shift ;;
             -y|--yes)          ASSUME_YES=1; shift ;;
             -h|--help)         usage; exit 0 ;;
@@ -296,6 +318,27 @@ load_previous_install() {
     PREV_PORT="$(conf_get "$INSTALL_CONF" PORT)"
     PREV_NGINX_SITE="$(conf_get "$INSTALL_CONF" NGINX_SITE)"
     PREV_NGINX_LINK="$(conf_get "$INSTALL_CONF" NGINX_LINK)"
+    local prev
+    if [[ -z "$EMAIL" ]]; then
+        prev="$(conf_get "$INSTALL_CONF" EMAIL)"
+        if [[ -n "$prev" && "$prev" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            EMAIL="$prev"; PREV_CHOICES+=("--email $prev")
+        fi
+    fi
+    if [[ -z "$WANT_HTTPS" ]]; then
+        if [[ "$(conf_get "$INSTALL_CONF" NO_HTTPS)" == "1" ]]; then
+            WANT_HTTPS=0; PREV_CHOICES+=("--no-https")
+        else
+            WANT_HTTPS=1
+        fi
+    fi
+    if [[ -z "$FORCE_NO_NGINX" ]]; then
+        if [[ "$(conf_get "$INSTALL_CONF" NO_NGINX)" == "1" ]]; then
+            FORCE_NO_NGINX=1; PREV_CHOICES+=("--no-nginx")
+        else
+            FORCE_NO_NGINX=0
+        fi
+    fi
     if [[ -z "$PORT" ]]; then
         if [[ "$PREV_PORT" =~ ^[0-9]+$ ]]; then PORT="$PREV_PORT"; else PORT=8787; fi
     fi
@@ -456,7 +499,15 @@ show_services() {
         say "  pm2: не запущен"
     fi
 
-    if command -v docker >/dev/null 2>&1; then
+    # docker: "docker ps" is called only when dockerd already runs. Otherwise socket activation
+    # (docker.socket) could start dockerd and, with it, every container with a restart policy,
+    # for example an old copy of the bot.
+    local docker_up=0
+    if (( HAVE_SYSTEMD )) && systemctl is-active --quiet docker 2>/dev/null; then docker_up=1; fi
+    if pgrep -x dockerd >/dev/null 2>&1; then docker_up=1; fi
+    if command -v docker >/dev/null 2>&1 && (( ! docker_up )); then
+        say "  docker установлен, демон не запущен (docker ps не вызываем: он мог бы запустить демон и контейнеры)"
+    elif command -v docker >/dev/null 2>&1; then
         local out
         if out="$(timeout 10 docker ps --format '{{.Names}}  {{.Image}}  {{.Status}}  {{.Ports}}' 2>/dev/null)"; then
             say "  Контейнеры docker (docker ps, только чтение):"
@@ -488,6 +539,9 @@ show_services() {
 check_nginx_state() {
     if command -v nginx >/dev/null 2>&1 || [[ -x /usr/sbin/nginx ]]; then NGINX_INSTALLED=1; fi
     if (( HAVE_SYSTEMD )) && systemctl is-active --quiet nginx 2>/dev/null; then NGINX_ACTIVE=1; fi
+    if (( HAVE_SYSTEMD && NGINX_INSTALLED )); then
+        NGINX_ENABLED="$(systemctl is-enabled nginx 2>/dev/null || true)"
+    fi
     if [[ -f /proc/net/if_inet6 ]]; then HAVE_V6=1; fi
 }
 
@@ -527,50 +581,275 @@ check_ports() {
     fi
 }
 
-nginx_layout() {
-    # Picks where our site file goes, without editing nginx.conf.
-    local conf=/etc/nginx/nginx.conf
-    if [[ -n "$PREV_NGINX_SITE" && -f "$PREV_NGINX_SITE" ]] && grep -q "$MARKER" "$PREV_NGINX_SITE"; then
-        NGINX_SITE="$PREV_NGINX_SITE"; NGINX_LINK="$PREV_NGINX_LINK"; return 0
-    fi
-    if [[ ! -f "$conf" ]]; then
-        # Fresh install from the Debian/Ubuntu package uses sites-enabled.
-        NGINX_SITE=/etc/nginx/sites-available/amazake-web.conf
-        NGINX_LINK=/etc/nginx/sites-enabled/amazake-web.conf
-        return 0
-    fi
-    if grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/sites-enabled/' "$conf"; then
-        NGINX_SITE=/etc/nginx/sites-available/amazake-web.conf
-        NGINX_LINK=/etc/nginx/sites-enabled/amazake-web.conf
-    elif grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/conf\.d/\*\.conf' "$conf"; then
-        NGINX_SITE=/etc/nginx/conf.d/amazake-web.conf
-        NGINX_LINK=""
+# Is $1 one of our nginx files (a file with our marker, or a symlink to one / to a missing file
+# with one of our names)?
+nginx_file_ours() {
+    local f="$1" real base
+    base="$(basename "$f")"
+    if [[ -L "$f" ]]; then
+        real="$(readlink -f "$f" || true)"
+        [[ "$base" == "$NGINX_NAME" || "$base" == "$NGINX_LEGACY_NAME" ]] || return 1
+        [[ ! -e "$real" ]] || grep -q "$MARKER" "$real" 2>/dev/null
     else
-        NGINX_SITE=""
-        NGINX_LINK=""
+        [[ -f "$f" ]] && grep -q "$MARKER" "$f" 2>/dev/null
     fi
 }
 
-# Is there another enabled nginx server block (not ours) with our domain? Uses "nginx -T", which
-# prints the effective configuration with "# configuration file <path>:" before each file.
-nginx_domain_conflict() {
-    local dump
-    dump="$(nginx -T 2>/dev/null)" || return 1
-    awk -v dom="$DOMAIN" -v marker="$MARKER" '
-        /^# configuration file / { file = $4; sub(/:$/, "", file); ours = 0; next }
-        index($0, marker) { ours = 1 }
-        ours { next }
+nginx_layout() {
+    # Picks where our site file goes, without editing nginx.conf.
+    local conf=/etc/nginx/nginx.conf
+    NGINX_SITE=""; NGINX_LINK=""; LEGACY_NGINX=()
+    if [[ ! -f "$conf" ]] || grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/sites-enabled/' "$conf"; then
+        # A fresh install from the Debian/Ubuntu package uses sites-enabled too.
+        NGINX_SITE="/etc/nginx/sites-available/$NGINX_NAME"
+        NGINX_LINK="/etc/nginx/sites-enabled/$NGINX_NAME"
+    elif grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/conf\.d/\*\.conf' "$conf"; then
+        NGINX_SITE="/etc/nginx/conf.d/$NGINX_NAME"
+    fi
+    # Our files under the old name (it sorted first and could become the default server).
+    local f
+    for f in "$PREV_NGINX_SITE" "$PREV_NGINX_LINK" \
+             "/etc/nginx/sites-available/$NGINX_LEGACY_NAME" "/etc/nginx/sites-enabled/$NGINX_LEGACY_NAME" \
+             "/etc/nginx/conf.d/$NGINX_LEGACY_NAME"; do
+        [[ -n "$f" && "$f" == /etc/nginx/* && "$(basename "$f")" == "$NGINX_LEGACY_NAME" ]] || continue
+        if [[ -e "$f" || -L "$f" ]] && nginx_file_ours "$f"; then LEGACY_NGINX+=("$f"); fi
+    done
+    if (( ${#LEGACY_NGINX[@]} )); then
+        mapfile -t LEGACY_NGINX < <(printf '%s\n' "${LEGACY_NGINX[@]}" | awk '!seen[$0]++')
+    fi
+}
+
+# Reads an "nginx -T" dump on stdin and prints one line per fact about http server blocks:
+#   L <n> <ours> <file> <addr:port> <default>   a listen socket of server n (no listen = *:80)
+#   N <n> <ours> <file> <name>                  a server_name of server n
+# Statements are joined up to ";" (so multi-line server_name works); quoted text and comments are
+# skipped. nginx -T prints each included file separately, so a listen inside a nested include is
+# not seen (the real check after writing our file still runs nginx -t on the full config).
+nginx_scan() {
+    awk -v marker="$MARKER" '
+        function sock(a,   host, port) {
+            if (a ~ /^unix:/) return ""
+            if (a ~ /^[0-9]+$/) return "*:" a
+            if (a == "*") return "*:80"
+            if (a ~ /^\[/) { if (a ~ /\]:[0-9]+$/) return tolower(a); return tolower(a) ":80" }
+            if (a ~ /:[0-9]+$/) {
+                host = a; sub(/:[0-9]+$/, "", host); port = a; sub(/^.*:/, "", port)
+                if (host == "0.0.0.0") host = "*"
+                return tolower(host) ":" port
+            }
+            return tolower(a) ":80"
+        }
+        function http_ctx(   i) {
+            for (i = 0; i < depth; i++) if (stack[i] == "stream" || stack[i] == "upstream" || stack[i] == "mail") return 0
+            return 1
+        }
+        function words(   n) { n = split(stmt, w, /[[:space:]]+/); if (n && w[1] == "") { shift_w(n); n-- } return n }
+        function shift_w(n,   i) { for (i = 1; i < n; i++) w[i] = w[i + 1]; delete w[n] }
+        function open_block(   n) {
+            n = words()
+            name = (n ? w[1] : "")
+            if (name == "server" && cur == 0 && http_ctx()) {
+                srv++; cur = srv; cur_depth = depth + 1; nlisten = 0
+                sfile[srv] = file; sours[srv] = ours_file
+            }
+            stack[depth++] = name; stmt = ""
+        }
+        function close_block() {
+            if (cur && depth == cur_depth) {
+                if (!nlisten) print "L", cur, sours[cur], sfile[cur], "*:80", 0
+                cur = 0
+            }
+            if (depth > 0) depth--
+            stmt = ""
+        }
+        function statement(   n, i, s, d) {
+            n = words(); stmt = ""
+            if (!n || !cur || depth != cur_depth) return
+            if (w[1] == "listen" && n >= 2) {
+                s = sock(w[2]); if (s == "") return
+                d = 0
+                for (i = 3; i <= n; i++) if (w[i] == "default_server" || w[i] == "default") d = 1
+                nlisten++
+                print "L", cur, sours[cur], sfile[cur], s, d
+            } else if (w[1] == "server_name") {
+                for (i = 2; i <= n; i++) if (w[i] != "") print "N", cur, sours[cur], sfile[cur], tolower(w[i])
+            }
+        }
+        /^# configuration file / {
+            file = $4; sub(/:$/, "", file); depth = 0; cur = 0; stmt = ""; ours_file = 0; next
+        }
         {
             line = $0
+            if (index(line, marker)) ours_file = 1
+            gsub(/"[^"]*"/, "\"\"", line)
+            gsub(/\047[^\047]*\047/, "\047\047", line)
             sub(/#.*/, "", line)
-            if (!match(line, /(^|[[:space:];{])server_name[[:space:]]+[^;]*/)) next
-            line = substr(line, RSTART, RLENGTH)
-            sub(/^.*server_name[[:space:]]+/, "", line)
-            n = split(line, names, /[[:space:]]+/)
-            for (i = 1; i <= n; i++) if (tolower(names[i]) == dom) { print file; found = 1 }
+            gsub(/[{};]/, "\n&\n", line)
+            np = split(line, parts, "\n")
+            for (k = 1; k <= np; k++) {
+                p = parts[k]
+                if (p == "{") open_block()
+                else if (p == "}") close_block()
+                else if (p == ";") statement()
+                else stmt = stmt " " p
+            }
         }
-        END { exit found ? 0 : 1 }
-    ' <<<"$dump"
+    '
+}
+
+# From nginx_scan output: sockets where OUR server would be the first one loaded while other
+# sites listen there too and none has default_server. Then our site would become the default
+# for that port and take requests by IP / for unknown names away from the owner's site.
+# Prints "<addr:port> <file of the site that is the default now>".
+nginx_default_takeover() {
+    awk '
+        $1 != "L" { next }
+        {
+            s = $5
+            if (!(s in first)) { first[s] = $3; firstfile[s] = $4 }
+            if ($3 == 0 && !(s in otherfile)) otherfile[s] = $4
+            if ($3 == 1) oursock[s] = 1
+            if ($6 == 1) hasdef[s] = 1
+        }
+        END {
+            for (s in oursock)
+                if (first[s] == 1 && (s in otherfile) && !(s in hasdef)) { print s, otherfile[s]; found = 1 }
+            exit found ? 0 : 1
+        }
+    '
+}
+
+# From nginx_scan output: other (not our) server blocks whose server_name catches $DOMAIN.
+# Prints "C <file>" for an exact or ".domain" match (a real conflict), "W <file> <name>" for a
+# wildcard that serves the domain now and would lose it to our exact name.
+nginx_name_matches() {
+    awk -v dom="$DOMAIN" '
+        $1 != "N" || $3 == 1 { next }
+        {
+            n = $5
+            if (n == dom || n == "." dom) { print "C", $4; next }
+            if (n ~ /^\./) { p = substr(n, 2) } else if (n ~ /^\*\./) { p = substr(n, 3) } else next
+            if (length(dom) > length(p) && substr(dom, length(dom) - length(p)) == "." p) print "W", $4, n
+        }
+    '
+}
+
+# Builds a throw-away copy of the nginx config in $TMP_DIR where our site file (variant $1) is
+# added next to the owner's files, and runs "nginx -T" on it. Nothing under /etc/nginx changes.
+# Sets SIM_RC, SIM_ERR (nginx -t messages) and SIM_DUMP (path of the dump).
+SIM_RC=1; SIM_ERR=""; SIM_DUMP=""; SIM_ROOT=""
+nginx_simulate() {
+    local variant="$1" sim="$TMP_DIR/nginx-sim" incdir incbase e
+    incdir="$(dirname "${NGINX_LINK:-$NGINX_SITE}")"
+    incbase="$(basename "$incdir")"
+    rm -rf -- "$sim"; mkdir -p "$sim/$incbase"
+    SIM_ROOT="$sim"; SIM_DUMP="$TMP_DIR/nginx-sim.dump"
+    # Mirror /etc/nginx with symlinks, so relative includes ("include snippets/x.conf") resolve.
+    for e in /etc/nginx/*; do
+        [[ "$(basename "$e")" == "nginx.conf" || "$(basename "$e")" == "$incbase" ]] && continue
+        ln -s "$e" "$sim/$(basename "$e")"
+    done
+    for e in "$incdir"/*; do
+        [[ -e "$e" || -L "$e" ]] || continue
+        nginx_file_ours "$e" && continue
+        ln -s "$e" "$sim/$incbase/$(basename "$e")"
+    done
+    if [[ "$variant" == "https-test" ]]; then
+        # No certificate yet: the same server blocks with a throw-away self-signed certificate in
+        # $TMP_DIR (or, without openssl, plain "listen 443" and no ssl_* lines).
+        if command -v openssl >/dev/null 2>&1 \
+            && openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=$DOMAIN" \
+                -keyout "$TMP_DIR/sim-key.pem" -out "$TMP_DIR/sim-cert.pem" >/dev/null 2>&1; then
+            render_nginx https | sed -e "s#ssl_certificate .*#ssl_certificate $TMP_DIR/sim-cert.pem;#" \
+                                     -e "s#ssl_certificate_key .*#ssl_certificate_key $TMP_DIR/sim-key.pem;#"
+        else
+            render_nginx https | sed -e 's/ ssl;/;/' -e '/ssl_certificate/d'
+        fi
+    else
+        render_nginx "$variant"
+    fi > "$sim/$incbase/$NGINX_NAME"
+    sed "s#/etc/nginx/$incbase/#$sim/$incbase/#g" /etc/nginx/nginx.conf > "$sim/nginx.conf"
+    SIM_RC=0
+    nginx -T -c "$sim/nginx.conf" > "$SIM_DUMP" 2> "$TMP_DIR/nginx-sim.err" || SIM_RC=$?
+    SIM_ERR="$(sed "s#$sim/#/etc/nginx/#g" "$TMP_DIR/nginx-sim.err")"
+    if (( SIM_RC == 0 )) && ! grep -q "$MARKER" "$SIM_DUMP"; then
+        SIM_RC=99; SIM_ERR="наш файл не подключился бы: include в nginx.conf не захватывает имя $NGINX_NAME"
+    fi
+}
+
+# Shows why "default server" matters and what the owner can do; $1 = lines from nginx_default_takeover.
+takeover_message() {
+    local lines="$1" s f example
+    while read -r s f; do
+        [[ -n "$s" ]] || continue
+        example="listen ${s#\*:} default_server;"
+        if [[ "$s" == *:443 ]]; then example="listen ${s#\*:} ssl default_server;"; fi
+        printf 'наш сайт стал бы сайтом по умолчанию для %s (сейчас это %s): запросы по IP и с доменами, которых нет в nginx, ушли бы к нам. Чтобы этого не было, в %s допишите default_server в конец listen для этого порта (например %s), проверьте nginx -t, сделайте systemctl reload nginx и запустите установку снова. Или используйте --no-nginx\n' \
+            "$s" "$f" "$f" "$example"
+    done <<<"$lines"
+}
+
+# Preflight with nginx installed: test our real site file against the owner's config before
+# anything is installed (catches long domains, duplicate names, default-server takeover).
+nginx_preflight_test() {
+    local first="http" out takeover names
+    if (( WANT_HTTPS && CERT_EXISTS )); then first="https"; fi
+    nginx_simulate "$first"
+    if (( SIM_RC != 0 )); then
+        blocker "nginx -t не примет наш файл сайта рядом с вашей конфигурацией (ничего не менялось):"
+        sed 's/^/      /' <<<"$SIM_ERR"
+        if grep -q 'server_names_hash' <<<"$SIM_ERR"; then
+            info "    Домен длинный для настроек nginx. Это правится одной строкой в блоке http {} файла"
+            info "    /etc/nginx/nginx.conf: server_names_hash_bucket_size 128; затем nginx -t и systemctl reload nginx."
+        fi
+        return 0
+    fi
+    names="$(nginx_scan < "$SIM_DUMP" | nginx_name_matches | sed "s#$SIM_ROOT/#/etc/nginx/#g" || true)"
+    if grep -q "conflicting server name \"$DOMAIN\"" <<<"$SIM_ERR" && ! grep -q '^C ' <<<"$names"; then
+        blocker "в nginx уже есть другой сайт с server_name $DOMAIN (nginx: conflicting server name). Его не трогаем; выберите другой домен или --no-nginx"
+    fi
+    if grep -q '^C ' <<<"$names"; then
+        blocker "в nginx уже есть другой сайт для $DOMAIN ($(awk '$1 == "C" {print $2}' <<<"$names" | sort -u | paste -sd, -)). Его не трогаем; выберите другой домен или --no-nginx"
+    fi
+    if grep -q '^W ' <<<"$names"; then
+        warn "$DOMAIN сейчас обслуживает сайт $(awk '$1 == "W" {print $2 " (" $3 ")"}' <<<"$names" | sort -u | paste -sd, -). После установки этот поддомен будет открывать наш сайт, остальные поддомены не изменятся"
+    fi
+    if takeover="$(nginx_scan < "$SIM_DUMP" | nginx_default_takeover)"; then
+        local line
+        while IFS= read -r line; do [[ -n "$line" ]] && blocker "$line"; done \
+            <<<"$(takeover_message "$(sed "s#$SIM_ROOT/#/etc/nginx/#g" <<<"$takeover")")"
+    else
+        ok "проверка nginx с нашим файлом ($first) на копии конфигурации: nginx -t ок, сайты по умолчанию на портах не меняются"
+    fi
+    if (( WANT_HTTPS && ! CERT_EXISTS )); then
+        # Port 443 is added only after the certificate; check it now with a stand-in file.
+        nginx_simulate https-test
+        if (( SIM_RC != 0 )); then
+            info "HTTPS-вариант заранее проверить не удалось; он будет проверен nginx -t перед применением"
+        elif takeover="$(nginx_scan < "$SIM_DUMP" | nginx_default_takeover)"; then
+            local line
+            while IFS= read -r line; do [[ -n "$line" ]] && blocker "$line"; done \
+                <<<"$(takeover_message "$(sed "s#$SIM_ROOT/#/etc/nginx/#g" <<<"$takeover")")"
+        fi
+    fi
+}
+
+# Certificates of other sites that renew by binding port 80 themselves (standalone) or through
+# a web server that is not running now. If we start nginx on :80 for good, their renewal breaks.
+check_cert_renewals() {
+    local f auth others=()
+    [[ -d /etc/letsencrypt/renewal ]] || return 0
+    for f in /etc/letsencrypt/renewal/*.conf; do
+        [[ -f "$f" ]] || continue
+        # Our own certificate (webroot in our acme folder) is fine.
+        grep -q "$ACME_DIR" "$f" 2>/dev/null && continue
+        auth="$(sed -n 's/^[[:space:]]*authenticator[[:space:]]*=[[:space:]]*//p' "$f" | tail -n 1 | tr -d '[:space:]')"
+        case "$auth" in
+            standalone|nginx|apache) others+=("$(basename "$f" .conf) ($auth)") ;;
+        esac
+    done
+    (( ${#others[@]} )) || return 0
+    blocker "на сервере есть сертификаты, которые продлеваются через порт 80: ${others[*]}. Если сейчас запустить nginx, он займёт порт 80 навсегда и их продление (например, сертификата бота) перестанет работать. Мы их не трогаем. Варианты: --no-nginx (сайт подключите к своему веб-серверу) или сами переведите эти сертификаты на webroot"
 }
 
 decide_web_mode() {
@@ -596,34 +875,24 @@ decide_web_mode() {
         ok "на 80/443 работает nginx: добавим ТОЛЬКО свой файл сайта для $DOMAIN и сделаем reload (не restart)"
     elif (( NGINX_INSTALLED )); then
         NGINX_START=1
-        info "nginx установлен, но не запущен, а порты 80/443 свободны: запустим его (systemctl start nginx)"
+        if [[ "$NGINX_ENABLED" == "masked" ]]; then
+            blocker "nginx установлен, но отключён через systemctl mask (кто-то запретил его запуск). Не трогаем; используйте --no-nginx или сами выполните systemctl unmask nginx"
+        elif [[ "$NGINX_ENABLED" == "enabled" ]]; then
+            info "nginx установлен и включён в автозапуск, но сейчас не запущен, порты 80/443 свободны: запустим его (systemctl start nginx)"
+        else
+            info "nginx установлен, но не запущен и не в автозапуске (${NGINX_ENABLED:-неизвестно}); порты 80/443 свободны: запустим его (systemctl start nginx)."
+            warn "автозапуск nginx мы не включаем (его выключили не мы). После перезагрузки сервера сайт откроется только если включить его самим: sudo systemctl enable nginx"
+        fi
     else
         NEED_APT+=("nginx")
         info "порты 80/443 свободны, nginx нет: предложим установить nginx (apt-get install nginx)"
+        if (( ${#DOMAIN} >= LONG_DOMAIN )); then
+            blocker "домен длиннее $((LONG_DOMAIN - 1)) символов: со стандартными настройками nginx его не примет (server_names_hash_bucket_size). Поставьте nginx сами (apt-get install nginx), добавьте в блок http {} файла /etc/nginx/nginx.conf строку server_names_hash_bucket_size 128; и запустите установку снова. Или возьмите домен короче"
+        fi
     fi
-
-    if (( NGINX_INSTALLED )); then
-        if (( IS_ROOT )); then
-            local t
-            if t="$(nginx -t 2>&1)"; then
-                ok "текущая конфигурация nginx корректна (nginx -t)"
-            else
-                blocker "nginx -t уже сейчас выдаёт ошибку (это не наша конфигурация, её не трогаем):"
-                sed 's/^/      /' <<<"$t"
-            fi
-        fi
-        nginx_layout
-        if [[ -z "$NGINX_SITE" ]]; then
-            blocker "в /etc/nginx/nginx.conf нет include для sites-enabled или conf.d; nginx.conf не правим. Используйте --no-nginx и подключите сайт вручную"
-        fi
-        local conflict
-        if (( IS_ROOT )) && conflict="$(nginx_domain_conflict)"; then
-            blocker "в nginx уже есть другой сайт с server_name $DOMAIN ($(sort -u <<<"$conflict" | paste -sd, -)). Его не трогаем; выберите другой домен или --no-nginx"
-        fi
-    else
-        nginx_layout
+    if (( NGINX_START )) || [[ " ${NEED_APT[*]} " == *" nginx "* ]]; then
+        check_cert_renewals
     fi
-    if [[ -n "$NGINX_SITE" ]]; then info "наш файл nginx: $NGINX_SITE${NGINX_LINK:+ (+ ссылка $NGINX_LINK)}"; fi
 
     if (( WANT_HTTPS )); then
         if [[ -z "$EMAIL" ]]; then
@@ -640,6 +909,33 @@ decide_web_mode() {
     else
         info "--no-https: только HTTP"
     fi
+
+    nginx_layout
+    if (( NGINX_INSTALLED )); then
+        local nginx_ok=0
+        if (( IS_ROOT )); then
+            local t
+            if t="$(nginx -t 2>&1)"; then
+                nginx_ok=1
+                ok "текущая конфигурация nginx корректна (nginx -t)"
+            else
+                blocker "nginx -t уже сейчас выдаёт ошибку (это не наша конфигурация, её не трогаем):"
+                sed 's/^/      /' <<<"$t"
+            fi
+        else
+            info "без root nginx заранее не проверить; при установке проверка будет"
+        fi
+        if [[ -z "$NGINX_SITE" ]]; then
+            blocker "в /etc/nginx/nginx.conf нет include для sites-enabled или conf.d; nginx.conf не правим. Используйте --no-nginx и подключите сайт вручную"
+        elif (( nginx_ok )); then
+            nginx_preflight_test
+        fi
+    fi
+    if [[ -n "$NGINX_SITE" ]]; then info "наш файл nginx: $NGINX_SITE${NGINX_LINK:+ (+ ссылка $NGINX_LINK)}"; fi
+    if (( ${#LEGACY_NGINX[@]} )); then
+        info "старое имя нашего файла будет заменено новым (оно загружалось первым): ${LEGACY_NGINX[*]}"
+    fi
+
 }
 
 check_dns() {
@@ -678,14 +974,35 @@ check_misc() {
     fi
 }
 
+# The amazake-web user must be ours (created by this installer) or not exist at all, so that we
+# never adopt, and uninstall.sh never deletes, an account someone else made.
+check_service_user() {
+    local ent gecos
+    if ent="$(getent passwd "$SERVICE_USER" 2>/dev/null)"; then
+        gecos="$(cut -d: -f5 <<<"$ent")"
+        if [[ "$(conf_get "$INSTALL_CONF" CREATED_USER)" == "1" || "$gecos" == "$USER_COMMENT" ]]; then
+            USER_OURS=1; CREATED_USER=1
+            ok "пользователь $SERVICE_USER уже есть (создан этим установщиком раньше)"
+        else
+            blocker "пользователь $SERVICE_USER уже есть, но создан не этим установщиком. Чужую учётную запись не используем и не меняем; переименуйте или удалите её сами"
+        fi
+    elif getent group "$SERVICE_USER" >/dev/null 2>&1; then
+        blocker "группа $SERVICE_USER уже есть, но пользователя нет: группа чужая. Её не используем (её участники видели бы токен); удалите или переименуйте её сами"
+    fi
+}
+
 preflight() {
     header "Проверка (ничего не меняется)"
+    if (( ${#PREV_CHOICES[@]} )); then
+        info "из прошлой установки: ${PREV_CHOICES[*]} (поменять: --https, --nginx, --email ...)"
+    fi
     check_os
     check_root
     check_systemd
     check_tools
     check_python
     check_source
+    check_service_user
     if [[ -f "$INSTALL_CONF" ]]; then
         info "найдена прошлая установка (домен ${PREV_DOMAIN:-?}, порт ${PREV_PORT:-?}): файлы будут обновлены"
         if [[ -n "$PREV_DOMAIN" && "$PREV_DOMAIN" != "$DOMAIN" ]]; then
@@ -720,9 +1037,9 @@ show_plan() {
     local i=1
     step() { printf '  %d. %s\n' "$i" "$*"; i=$((i + 1)); }
     if (( ${#NEED_APT[@]} )); then
-        step "apt-get update и apt-get install --no-install-recommends ${NEED_APT[*]} (только эти пакеты; если apt захочет ОБНОВИТЬ уже установленные пакеты, установка остановится; needrestart не будет перезапускать сервисы)"
+        step "apt-get update и apt-get install --no-install-recommends ${NEED_APT[*]} (только эти пакеты; если apt захочет ОБНОВИТЬ или УДАЛИТЬ уже установленные пакеты, установка остановится; needrestart не будет перезапускать сервисы)"
     fi
-    if getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+    if (( USER_OURS )); then
         step "пользователь $SERVICE_USER уже есть"
     else
         step "создать системного пользователя $SERVICE_USER (без входа и без домашней папки)"
@@ -737,8 +1054,20 @@ show_plan() {
     fi
     step "systemd: $UNIT_FILE, daemon-reload, enable и (пере)запуск ТОЛЬКО $APP_NAME.service"
     if [[ "$WEB_MODE" == "nginx" ]]; then
-        if (( NGINX_START )); then step "запустить остановленный nginx (systemctl start nginx) после nginx -t"; fi
-        step "nginx: свой файл $NGINX_SITE${NGINX_LINK:+ + ссылка $NGINX_LINK}, server_name $DOMAIN; nginx -t, и только если ок: systemctl reload nginx (при ошибке наш файл убирается)"
+        if (( NGINX_START )); then
+            if [[ "$NGINX_ENABLED" == "enabled" ]]; then
+                step "запустить остановленный nginx (systemctl start nginx) после nginx -t; автозапуск у него уже включён"
+            else
+                step "запустить остановленный nginx (systemctl start nginx) после nginx -t; автозапуск НЕ включаем (systemctl enable не делаем)"
+            fi
+        fi
+        if [[ " ${NEED_APT[*]} " == *" nginx "* ]]; then
+            step "новый nginx пакет запустит и включит в автозапуск сам (порты 80/443 сейчас никем не заняты)"
+        fi
+        if (( ${#LEGACY_NGINX[@]} )); then
+            step "убрать наш файл nginx со старым именем (${LEGACY_NGINX[*]})"
+        fi
+        step "nginx: свой файл $NGINX_SITE${NGINX_LINK:+ + ссылка $NGINX_LINK}, server_name $DOMAIN; nginx -t и проверка, что наш сайт не стал сайтом по умолчанию; только если всё ок: systemctl reload nginx (иначе наш файл убирается)"
         if (( WANT_HTTPS )) && (( ! CERT_EXISTS )); then
             step "проверить, что http://$DOMAIN ведёт на этот сервер; если да — certbot certonly --webroot (certbot не меняет конфиги nginx), затем HTTPS-версия нашего файла, nginx -t, reload"
         elif (( CERT_EXISTS )); then
@@ -755,9 +1084,11 @@ confirm() {
     (( DRY_RUN )) && return 0
     (( ASSUME_YES )) && return 0
     local answer=""
-    if [[ -r /dev/tty ]]; then
-        printf '\nПродолжить? [y/N] ' > /dev/tty
-        read -r answer < /dev/tty || answer=""
+    # "[[ -r /dev/tty ]]" only checks mode bits; opening it is the real test (ENXIO without a terminal).
+    if { exec 3<>/dev/tty; } 2>/dev/null; then
+        printf '\nПродолжить? [y/N] ' >&3
+        read -r answer <&3 || answer=""
+        exec 3>&-
     else
         die "нет терминала для подтверждения; запустите с --yes, если план выше вас устраивает"
     fi
@@ -830,40 +1161,43 @@ apt_install() {
     header "Пакеты: ${NEED_APT[*]}"
     # needrestart (Ubuntu) would otherwise offer to restart services after apt, which could hit the bot.
     local -a aptenv=(env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1)
-    local -a aptopts=(-y -q --no-install-recommends --no-upgrade -o DPkg::Lock::Timeout=300
+    # --no-remove: apt fails instead of removing an installed package that conflicts.
+    local -a aptopts=(-y -q --no-install-recommends --no-upgrade --no-remove -o DPkg::Lock::Timeout=300
                       -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
     run "${aptenv[@]}" apt-get -q -o DPkg::Lock::Timeout=300 update
     if (( ! DRY_RUN )); then
-        local sim upgrades
-        sim="$("${aptenv[@]}" apt-get -s "${aptopts[@]}" install "${NEED_APT[@]}")"
+        local sim upgrades removals
+        if ! sim="$("${aptenv[@]}" apt-get -s "${aptopts[@]}" install "${NEED_APT[@]}" 2>&1)"; then
+            sed 's/^/    /' <<<"$sim" >&2
+            die "apt не может поставить ${NEED_APT[*]}, не удаляя и не обновляя уже установленные пакеты (вывод выше). Ничего не установлено. Варианты: --no-nginx или установить ${NEED_APT[*]} вручную"
+        fi
         # "Inst pkg [oldversion] (...)" means an already installed package would be upgraded.
         upgrades="$(grep -E '^Inst [^ ]+ \[' <<<"$sim" | awk '{print $2}' | paste -sd' ' - || true)"
-        if [[ -n "$upgrades" ]]; then
-            die "apt хочет обновить уже установленные пакеты ($upgrades) ради ${NEED_APT[*]}. Мы так не делаем, чтобы не задеть другие программы. Ничего не установлено. Варианты: --no-nginx (и подключить сайт к своему веб-серверу) или установить ${NEED_APT[*]} вручную, когда будете готовы"
+        removals="$(grep -E '^Remv ' <<<"$sim" | awk '{print $2}' | paste -sd' ' - || true)"
+        if [[ -n "$upgrades" || -n "$removals" ]]; then
+            die "apt хочет${upgrades:+ обновить уже установленные пакеты ($upgrades)}${removals:+ удалить пакеты ($removals)} ради ${NEED_APT[*]}. Мы так не делаем, чтобы не задеть другие программы. Ничего не установлено. Варианты: --no-nginx (и подключить сайт к своему веб-серверу) или установить ${NEED_APT[*]} вручную, когда будете готовы"
         fi
         info "будут установлены новые пакеты: $(grep -E '^Inst ' <<<"$sim" | awk '{print $2}' | paste -sd' ' -)"
     else
-        printf '  %s[dry-run]%s проверка: apt-get -s install ... (стоп, если обновляются уже установленные пакеты)\n' "$C_C" "$C_0"
+        printf '  %s[dry-run]%s проверка: apt-get -s install ... (стоп, если обновляются или удаляются уже установленные пакеты)\n' "$C_C" "$C_0"
     fi
     run "${aptenv[@]}" apt-get "${aptopts[@]}" install "${NEED_APT[@]}"
     done_step "установлены пакеты: ${NEED_APT[*]}"
-    if [[ " ${NEED_APT[*]} " == *" nginx "* ]]; then NGINX_INSTALLED=1; fi
+    if [[ " ${NEED_APT[*]} " == *" nginx "* ]]; then NGINX_INSTALLED=1; NGINX_FROM_APT=1; fi
     if [[ " ${NEED_APT[*]} " == *" certbot "* ]]; then CERTBOT_BIN="$(command -v certbot 2>/dev/null || echo /usr/bin/certbot)"; fi
 }
 
 ensure_user() {
     CURRENT_STEP="пользователь $SERVICE_USER"
-    if getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+    # Preflight already stopped if a user or group of this name exists and is not ours.
+    if (( USER_OURS )); then
         ok "пользователь $SERVICE_USER уже есть"
         return 0
     fi
-    if getent group "$SERVICE_USER" >/dev/null 2>&1; then
-        run useradd --system --gid "$SERVICE_USER" --no-create-home --home-dir /nonexistent \
-            --shell /usr/sbin/nologin --comment "Amazake profiler site" "$SERVICE_USER"
-    else
-        run useradd --system --user-group --no-create-home --home-dir /nonexistent \
-            --shell /usr/sbin/nologin --comment "Amazake profiler site" "$SERVICE_USER"
-    fi
+    # The comment is how a later run (and uninstall.sh) recognises the account as ours.
+    run useradd --system --user-group --no-create-home --home-dir /nonexistent \
+        --shell /usr/sbin/nologin --comment "$USER_COMMENT" "$SERVICE_USER"
+    CREATED_USER=1
     done_step "создан пользователь $SERVICE_USER"
 }
 
@@ -952,10 +1286,14 @@ EOF
     write_file "$INSTALL_CONF" 0644 root:root <<EOF
 # $MARKER. Used by install.sh (re-runs) and uninstall.sh.
 DOMAIN=$DOMAIN
+EMAIL=$EMAIL
 PORT=$PORT
 WEB_MODE=$WEB_MODE
+NO_NGINX=$FORCE_NO_NGINX
+NO_HTTPS=$(( WANT_HTTPS ? 0 : 1 ))
 NGINX_SITE=$NGINX_SITE
 NGINX_LINK=$NGINX_LINK
+CREATED_USER=$CREATED_USER
 EOF
     done_step "настройки в $CONF_DIR"
 }
@@ -994,22 +1332,44 @@ PY
     die "сервис $APP_NAME не запустился (другие сервисы не затронуты)"
 }
 
-nginx_test() { nginx -t >/dev/null 2>&1; }
+# Checks the live nginx config after our file was written (before any reload). Prints the
+# reason and returns 1 if it must not be applied: nginx -t fails, our domain is a duplicate, or
+# our site would become the default server for a port that other sites use.
+nginx_check_live() {
+    local out dump takeover
+    if ! out="$(nginx -t 2>&1)"; then
+        printf 'nginx -t не принял наш файл:\n%s\n' "$out"
+        return 1
+    fi
+    if grep -q "conflicting server name \"$DOMAIN\"" <<<"$out"; then
+        printf 'в nginx уже есть другой сайт с server_name %s:\n%s\n' "$DOMAIN" "$out"
+        return 1
+    fi
+    if dump="$(nginx -T 2>/dev/null)" && takeover="$(nginx_scan <<<"$dump" | nginx_default_takeover)"; then
+        takeover_message "$takeover"
+        return 1
+    fi
+    return 0
+}
 
-# Installs our nginx site file (variant http|https). On "nginx -t" failure restores the previous
-# state of OUR files and stops without reloading; nginx keeps running with its old config.
+# Installs our nginx site file (variant http|https). If the live check fails, restores the
+# previous state of OUR files and stops without reloading; nginx keeps running with its old config.
 apply_nginx_site() {
     local variant="$1"
     CURRENT_STEP="файл сайта nginx ($variant)"
-    local backup="" had_link=0 new
+    local backup="" had_link=0 new legacy_tar=""
     new="$(mktemp "$TMP_DIR/nginx.XXXXXX")"
     render_nginx "$variant" > "$new"
     if (( DRY_RUN )); then
+        if (( ${#LEGACY_NGINX[@]} )); then run rm -f -- "${LEGACY_NGINX[@]}"; fi
         write_file "$NGINX_SITE" 0644 root:root < "$new"
         if [[ -n "$NGINX_LINK" ]]; then run ln -sfn "$NGINX_SITE" "$NGINX_LINK"; fi
         run nginx -t
-        if (( NGINX_START )) || [[ " ${NEED_APT[*]} " == *" nginx "* ]]; then
-            printf '  %s[dry-run]%s %s\n' "$C_C" "$C_0" "systemctl reload nginx (или systemctl enable --now nginx, если он не запущен)"
+        printf '  %s[dry-run]%s %s\n' "$C_C" "$C_0" "nginx -T: проверить, что наш сайт не стал сайтом по умолчанию"
+        if [[ " ${NEED_APT[*]} " == *" nginx "* ]]; then
+            printf '  %s[dry-run]%s %s\n' "$C_C" "$C_0" "systemctl reload nginx (nginx только что поставлен пакетом)"
+        elif (( NGINX_START )); then
+            run systemctl start nginx
         else
             run systemctl reload nginx
         fi
@@ -1024,25 +1384,38 @@ apply_nginx_site() {
     if [[ -n "$NGINX_LINK" && -e "$NGINX_LINK" && ! -L "$NGINX_LINK" ]]; then
         die "$NGINX_LINK существует и это не ссылка на наш файл. Не трогаем его"
     fi
-    if [[ -n "$backup" ]] && cmp -s "$new" "$NGINX_SITE" && { [[ -z "$NGINX_LINK" ]] || (( had_link )); }; then
+    if (( ! ${#LEGACY_NGINX[@]} )) && [[ -n "$backup" ]] && cmp -s "$new" "$NGINX_SITE" \
+        && { [[ -z "$NGINX_LINK" ]] || (( had_link )); }; then
         ok "файл nginx не изменился"
         if ! systemctl is-active --quiet nginx; then start_nginx; fi
         return 0
     fi
+    if (( ${#LEGACY_NGINX[@]} )); then
+        # Our files under the old name: keep a copy (symlinks too) to put back on failure.
+        legacy_tar="$TMP_DIR/nginx-legacy.tar"
+        tar -C / -cpf "$legacy_tar" "${LEGACY_NGINX[@]#/}"
+        rm -f -- "${LEGACY_NGINX[@]}"
+    fi
     write_file "$NGINX_SITE" 0644 root:root < "$new"
     if [[ -n "$NGINX_LINK" ]]; then ln -sfn "$NGINX_SITE" "$NGINX_LINK"; fi
-    local out
-    if ! out="$(nginx -t 2>&1)"; then
+    local why
+    if ! why="$(nginx_check_live)"; then
         # Put our files back as they were; other files were never touched.
         if [[ -n "$backup" ]]; then
             cp -p -- "$backup" "$NGINX_SITE"
+            if [[ -n "$NGINX_LINK" ]] && (( ! had_link )); then rm -f -- "$NGINX_LINK"; fi
         else
             rm -f -- "$NGINX_SITE"
             if [[ -n "$NGINX_LINK" ]] && (( ! had_link )); then rm -f -- "$NGINX_LINK"; fi
         fi
-        fail "nginx -t не принял наш файл, он убран обратно; nginx НЕ перезагружался и работает как раньше:"
-        sed 's/^/    /' <<<"$out" >&2
+        if [[ -n "$legacy_tar" ]]; then tar -C / -xpf "$legacy_tar"; fi
+        fail "наш файл nginx не применён и убран обратно; nginx НЕ перезагружался и работает как раньше. Причина:"
+        sed 's/^/    /' <<<"$why" >&2
         die "файл сайта nginx не применён"
+    fi
+    if (( ${#LEGACY_NGINX[@]} )); then
+        done_step "убран наш файл nginx со старым именем: ${LEGACY_NGINX[*]}"
+        LEGACY_NGINX=()
     fi
     if systemctl is-active --quiet nginx; then
         systemctl reload nginx
@@ -1050,15 +1423,17 @@ apply_nginx_site() {
         # Only reachable when ports 80/443 were free (checked in preflight).
         start_nginx
     fi
-    done_step "nginx: файл $NGINX_SITE ($variant), nginx -t ок, reload"
+    done_step "nginx: файл $NGINX_SITE ($variant), проверка ок, reload"
 }
 
+# Starts nginx. Autostart is turned on only for an nginx this run installed: an nginx the owner
+# had stopped or disabled keeps its boot setting.
 start_nginx() {
-    systemctl enable --quiet nginx
+    if (( NGINX_FROM_APT )); then systemctl enable --quiet nginx; fi
     systemctl start nginx
     NGINX_START=0
     NGINX_ACTIVE=1
-    done_step "nginx запущен"
+    done_step "nginx запущен$( (( NGINX_FROM_APT )) && printf ' и включён в автозапуск')"
 }
 
 # Checks over plain HTTP that $DOMAIN reaches this nginx (what Let's Encrypt will do).
@@ -1192,7 +1567,11 @@ summary() {
         say "      upload-token: \"\"   # сайт сейчас принимает отчёты без токена"
     fi
     say ""
-    say "  Обновить:  sudo git -C $SOURCE_DIR pull --ff-only && sudo bash $SCRIPT_DIR/install.sh --domain $DOMAIN${EMAIL:+ --email $EMAIL}"
+    # --email/--no-https/--no-nginx are also remembered in install.conf; printed for clarity.
+    local flags="--domain $DOMAIN${EMAIL:+ --email $EMAIL}"
+    if (( ! WANT_HTTPS )); then flags+=" --no-https"; fi
+    if (( FORCE_NO_NGINX )); then flags+=" --no-nginx"; fi
+    say "  Обновить:  sudo git -C $SOURCE_DIR pull --ff-only && sudo bash $SCRIPT_DIR/install.sh $flags"
     say "  Удалить:   sudo bash $SCRIPT_DIR/uninstall.sh   (отчёты останутся; --purge удалит и их)"
     if (( ${#WARNINGS[@]} )); then
         say ""
@@ -1207,6 +1586,8 @@ main() {
     parse_args "$@"
     load_previous_install
     say "${C_B}Установка сайта профайлера Amazake${C_0} для $DOMAIN$( (( DRY_RUN )) && printf ' (dry-run: ничего не меняется)')"
+    # Scratch space for read-only checks (nginx config test copy) and later for temp files.
+    TMP_DIR="$(mktemp -d)"
     preflight
 
     if (( ${#BLOCKERS[@]} )); then
@@ -1226,7 +1607,6 @@ main() {
     if (( ! DRY_RUN )); then
         acquire_lock
     fi
-    TMP_DIR="$(mktemp -d)"
     INSTALL_STARTED=1
     header "Установка$( (( DRY_RUN )) && printf ' (dry-run)')"
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Removes the Amazake profiler site installed by install.sh, and nothing else.
 #
-#   sudo bash web/deploy/uninstall.sh [--purge] [--dry-run] [--yes]
+#   sudo bash web/deploy/uninstall.sh [--purge] [--remove-cert] [--dry-run] [--yes]
 #
 # Removes: amazake-web.service, our nginx site file (+ symlink, then "nginx -t && systemctl reload nginx"),
-# /opt/amazake-web, /etc/amazake-web, the amazake-web user.
+# /opt/amazake-web, /etc/amazake-web, the amazake-web user (only if install.sh created it).
 # Keeps: reports in /var/lib/amazake-web (unless --purge), the nginx and certbot packages, every other
 # nginx file and every certificate. With --purge it also deletes /var/lib/amazake-web and the
-# certificate that install.sh obtained for the site's domain.
+# certificate that install.sh obtained for the site's domain; --remove-cert deletes only that certificate.
 
 # SC2001: "sed 's/^/  /'" is used on purpose to indent multi-line output.
 # shellcheck disable=SC2001
@@ -23,15 +23,19 @@ readonly STATE_DIR="/var/lib/amazake-web"
 readonly ACME_DIR="$STATE_DIR/acme"
 readonly UNIT_FILE="/etc/systemd/system/amazake-web.service"
 readonly MARKER="managed by amazake-web installer"
+readonly USER_COMMENT="Amazake profiler site"
+readonly NGINX_NAMES=("zz-amazake-web.conf" "amazake-web.conf")   # current and old name
 
 PURGE=0
+REMOVE_CERT=0
 DRY_RUN=0
 ASSUME_YES=0
 HAVE_SYSTEMD=0
 DOMAIN=""
 WEB_MODE=""
 NGINX_FILES=()       # our nginx files (regular file and/or symlink)
-CERT_OURS=0
+CERT_OURS=0          # a certificate for DOMAIN obtained by install.sh exists
+USER_OURS=0          # the amazake-web user was created by install.sh
 DONE_STEPS=()
 CURRENT_STEP="подготовка"
 STARTED=0
@@ -73,12 +77,13 @@ usage() {
     cat <<'EOF'
 Удаление сайта профайлера Amazake, установленного install.sh. Больше ничего не трогает.
 
-  sudo bash uninstall.sh [--purge] [--dry-run] [--yes]
+  sudo bash uninstall.sh [--purge] [--remove-cert] [--dry-run] [--yes]
 
-  --purge      удалить и отчёты (/var/lib/amazake-web), и сертификат Let's Encrypt домена сайта
-  --dry-run    только показать, что будет сделано
-  --yes        не спрашивать подтверждение
-  -h, --help   эта справка
+  --purge        удалить и отчёты (/var/lib/amazake-web), и сертификат Let's Encrypt домена сайта
+  --remove-cert  удалить только сертификат домена сайта (отчёты остаются)
+  --dry-run      только показать, что будет сделано
+  --yes          не спрашивать подтверждение
+  -h, --help     эта справка
 
 Пакеты nginx и certbot, другие сайты nginx и другие сертификаты не удаляются никогда.
 EOF
@@ -113,7 +118,8 @@ trap cleanup EXIT
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --purge)    PURGE=1; shift ;;
+            --purge)    PURGE=1; REMOVE_CERT=1; shift ;;
+            --remove-cert) REMOVE_CERT=1; shift ;;
             --dry-run)  DRY_RUN=1; shift ;;
             -y|--yes)   ASSUME_YES=1; shift ;;
             -h|--help)  usage; exit 0 ;;
@@ -138,14 +144,16 @@ find_nginx_files() {
     link="$(conf_get "$INSTALL_CONF" NGINX_LINK)"
     [[ -n "$site" ]] && candidates+=("$site")
     [[ -n "$link" ]] && candidates+=("$link")
-    candidates+=(/etc/nginx/sites-available/amazake-web.conf /etc/nginx/sites-enabled/amazake-web.conf
-                 /etc/nginx/conf.d/amazake-web.conf)
+    local n
+    for n in "${NGINX_NAMES[@]}"; do
+        candidates+=("/etc/nginx/sites-available/$n" "/etc/nginx/sites-enabled/$n" "/etc/nginx/conf.d/$n")
+    done
     for c in "${candidates[@]}"; do
         case "$c" in /etc/nginx/*) ;; *) continue ;; esac
         if [[ -L "$c" ]]; then
             real="$(readlink -f "$c" || true)"
             # A symlink is ours only if it points to our file (or dangles where our file was).
-            if [[ "$(basename "$c")" == "amazake-web.conf" ]] && { [[ ! -e "$real" ]] || is_ours "$real"; }; then
+            if [[ " ${NGINX_NAMES[*]} " == *" $(basename "$c") "* ]] && { [[ ! -e "$real" ]] || is_ours "$real"; }; then
                 NGINX_FILES+=("$c")
             fi
         elif is_ours "$c"; then
@@ -180,13 +188,26 @@ preflight() {
     if (( ${#NGINX_FILES[@]} )); then
         info "наши файлы nginx: ${NGINX_FILES[*]}"
     fi
-    if (( PURGE )) && [[ -n "$DOMAIN" ]]; then
+    if [[ -n "$DOMAIN" ]]; then
         local renewal="/etc/letsencrypt/renewal/$DOMAIN.conf"
         if [[ -f "$renewal" ]] && grep -q "$ACME_DIR" "$renewal"; then
             CERT_OURS=1
-            info "сертификат $DOMAIN получен install.sh (webroot $ACME_DIR): будет удалён"
-        elif [[ -f "$renewal" ]]; then
+            if (( REMOVE_CERT )); then
+                info "сертификат $DOMAIN получен install.sh (webroot $ACME_DIR): будет удалён"
+            else
+                warn "сертификат $DOMAIN останется, но продлеваться больше не сможет (его проверочная папка уходит вместе с сайтом), и Let's Encrypt будет присылать письма об истечении. Удалить его: --remove-cert (отчёты останутся)"
+            fi
+        elif [[ -f "$renewal" ]] && (( REMOVE_CERT )); then
             warn "сертификат $DOMAIN есть, но получен не install.sh. Его не трогаем"
+        fi
+    fi
+    # The user is ours if install.sh recorded creating it, or it carries the comment install.sh sets.
+    local ent
+    if ent="$(getent passwd "$SERVICE_USER" 2>/dev/null)"; then
+        if [[ "$(conf_get "$INSTALL_CONF" CREATED_USER)" == "1" || "$(cut -d: -f5 <<<"$ent")" == "$USER_COMMENT" ]]; then
+            USER_OURS=1
+        else
+            warn "пользователь $SERVICE_USER создан не install.sh: его не удаляем"
         fi
     fi
 }
@@ -199,14 +220,22 @@ show_plan() {
     if (( ${#NGINX_FILES[@]} )); then
         step "удалить наши файлы nginx (${NGINX_FILES[*]}), nginx -t; если ок — systemctl reload nginx, если нет — вернуть файлы и остановиться"
     fi
-    if (( CERT_OURS )); then step "certbot delete --cert-name $DOMAIN (только сертификат этого сайта)"; fi
+    if (( CERT_OURS && REMOVE_CERT )); then
+        step "certbot delete --cert-name $DOMAIN (только сертификат этого сайта)"
+    elif (( CERT_OURS )); then
+        step "сертификат $DOMAIN оставить (он перестанет продлеваться; удалить: --remove-cert)"
+    fi
     step "удалить $APP_DIR и $CONF_DIR"
     if (( PURGE )); then
         step "удалить $STATE_DIR (все отчёты)"
     else
         step "оставить $STATE_DIR (отчёты); удалить их: --purge"
     fi
-    step "удалить пользователя $SERVICE_USER"
+    if (( USER_OURS )); then
+        step "удалить пользователя $SERVICE_USER"
+    elif getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+        step "пользователя $SERVICE_USER не трогать (создан не install.sh)"
+    fi
     step "пакеты nginx/certbot, другие сайты и сертификаты не трогаются"
     unset -f step
 }
@@ -215,9 +244,11 @@ confirm() {
     (( DRY_RUN )) && return 0
     (( ASSUME_YES )) && return 0
     local answer=""
-    [[ -r /dev/tty ]] || die "нет терминала для подтверждения; запустите с --yes"
-    printf '\nПродолжить? [y/N] ' > /dev/tty
-    read -r answer < /dev/tty || answer=""
+    # "[[ -r /dev/tty ]]" only checks mode bits; opening it is the real test (ENXIO without a terminal).
+    { exec 3<>/dev/tty; } 2>/dev/null || die "нет терминала для подтверждения; запустите с --yes"
+    printf '\nПродолжить? [y/N] ' >&3
+    read -r answer <&3 || answer=""
+    exec 3>&-
     case "${answer,,}" in
         y|yes|д|да) ;;
         *) say "Отменено, ничего не изменено."; exit 0 ;;
@@ -275,7 +306,7 @@ remove_nginx() {
 }
 
 remove_cert() {
-    (( CERT_OURS )) || return 0
+    (( CERT_OURS && REMOVE_CERT )) || return 0
     CURRENT_STEP="сертификат $DOMAIN"
     if command -v certbot >/dev/null 2>&1; then
         run certbot delete --cert-name "$DOMAIN" --non-interactive
@@ -300,6 +331,7 @@ remove_dirs() {
 
 remove_user() {
     CURRENT_STEP="пользователь $SERVICE_USER"
+    (( USER_OURS )) || return 0
     if getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
         if ! run userdel "$SERVICE_USER"; then
             # Only happens if something still runs as amazake-web; we do not kill processes here.
@@ -333,6 +365,9 @@ main() {
     header "Готово"
     if (( ! PURGE )) && [[ -d "$STATE_DIR" ]]; then
         say "  Отчёты остались в $STATE_DIR (удалить: sudo bash $0 --purge или sudo rm -rf $STATE_DIR)."
+    fi
+    if (( CERT_OURS && ! REMOVE_CERT )); then
+        say "  Сертификат $DOMAIN остался и больше не продлится. Удалить: sudo certbot delete --cert-name $DOMAIN"
     fi
     if [[ "$WEB_MODE" == "external" && -n "$DOMAIN" ]]; then
         say "  Сайт подключался к вашему веб-серверу вручную: уберите там блок для $DOMAIN сами."
