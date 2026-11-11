@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # Publishing a release from main needs to write.
+  contents: write
 
 jobs:
   build:
@@ -37,7 +38,10 @@ jobs:
       - name: Build the server jar
         env:
           BUILD_NUMBER: ${{ github.run_number }}
-        run: ./gradlew createMojmapPaperclipJar --stacktrace --no-daemon
+        run: |
+          # Paper writes this into the jar as its build time (else 1970-01-01).
+          export BUILD_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          ./gradlew createMojmapPaperclipJar --stacktrace --no-daemon
 
       - name: The jar says it is Amazake
         run: |
@@ -53,3 +57,17 @@ jobs:
           name: amazake-${{ github.run_number }}
           path: amazake-server/build/libs/amazake-paperclip-*-mojmap.jar
           retention-days: 30
+
+      - name: Publish the build as a release (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jar=$(ls amazake-server/build/libs/amazake-paperclip-*-mojmap.jar)
+          name="amazake-1.21.11-${{ github.run_number }}.jar"
+          cp "$jar" "$name"
+          gh release create "build-${{ github.run_number }}" "$name" \
+            --target "$GITHUB_SHA" \
+            --title "Amazake 1.21.11 #${{ github.run_number }}" \
+            --notes "Built from ${GITHUB_SHA::7}: $(git log -1 --format=%s)" \
+            --latest

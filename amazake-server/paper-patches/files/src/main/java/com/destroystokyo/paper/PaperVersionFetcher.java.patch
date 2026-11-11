@@ -1,0 +1,10 @@
+--- a/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java
++++ b/src/main/java/com/destroystokyo/paper/PaperVersionFetcher.java
+@@ -65,6 +65,7 @@
+     }
+ 
+     public static void getUpdateStatusStartupMessage() {
++        if (true) return; // Amazake - PaperMC's builds say nothing about Amazake's: no Paper update check at start
+         int distance = DISTANCE_ERROR;
+ 
+         final OptionalInt buildNumber = BUILD_INFO.buildNumber();

@@ -1,6 +1,6 @@
 # Amazake
 
-Серверное ядро Minecraft **1.21.11**: форк [Paper](https://github.com/PaperMC/Paper). Цель — быстрое и удобное ядро для серверов Hoka в духе Leaf, но со своим набором изменений.
+Серверное ядро Minecraft **1.21.11**: форк [Paper](https://github.com/PaperMC/Paper). Цель — многопоточное, быстрое и удобное ядро для любых серверов: работают обычные плагины Paper, а каждая многопоточная фича включается переключателем в `amazake.yml`.
 
 ## Устройство
 
@@ -16,6 +16,12 @@
 | `amazake-*/build.gradle.kts.patch` | Сборка: подключение форка, ребрендинг |
 | `build-data/amazake.at` | Access transformers: открыть приватные поля и методы Minecraft |
 
+## Скачать
+
+Последняя сборка: **https://github.com/tearsmilk/amazake/releases/latest** (`amazake-1.21.11-N.jar`).
+
+Запускается как обычный Paper: положите jar в папку сервера и запустите `java -jar amazake-1.21.11-N.jar --nogui`. Ванильный сервер jar докачивает сам.
+
 ## Сборка
 
 Нужны JDK 21 и git.
@@ -28,16 +34,28 @@
 ./gradlew createMojmapPaperclipJar
 ```
 
-Готовый сервер: `amazake-server/build/libs/amazake-paperclip-1.21.11-R0.1-SNAPSHOT-mojmap.jar`. Он запускается как обычный Paper.
+Готовый сервер появится в `amazake-server/build/libs/amazake-paperclip-1.21.11-R0.1-SNAPSHOT-mojmap.jar`.
 
-То же самое собирает GitHub Actions на каждый пуш: jar лежит в Artifacts прогона «Build Amazake».
+Каждый пуш в `main` GitHub Actions собирает сам. Перед публикацией собранный сервер запускается, и проверяются `/version`, `/amazake`, `/spark` и `amazake.yml`. Если всё прошло, jar выкладывается в Releases.
+
+## Команды и права
+
+| Команда | Право | Что делает |
+|---|---|---|
+| `/amazake version` | `amazake.command` | Версия сборки |
+| `/amazake reload` | `amazake.command.reload` | Перечитать `amazake.yml` |
+| `/spark …` | `spark` | Встроенный профайлер spark из Paper (`/spark profiler`, `/spark tps`, `/spark health`) |
+
+По умолчанию эти права есть только у OP. Из консоли команды работают всегда.
 
 ## Как вносить изменения
 
-1. `./gradlew applyAllPatches`. Появятся `paper-server/`, `paper-api/` и `amazake-server/src/minecraft/`. Это git-репозитории с кодом.
+1. `./gradlew applyAllPatches`. Появятся `paper-server/`, `paper-api/` и `amazake-server/src/minecraft/` — git-репозитории с кодом.
 2. Правите код там и делаете коммиты внутри этих папок (один коммит — один патч).
-3. `./gradlew rebuildAllServerPatches` (для API — `rebuildAllApiPatches`). Коммиты превратятся в файлы в `*-patches/`.
-4. Коммитите файлы патчей в этот репозиторий.
+3. Пересобираете патчи. Для API и одиночных файлов Paper — `./gradlew rebuildPaperPatches`. Полный список задач пересборки серверной части выводит `./gradlew tasks --all | grep -i rebuild`.
+4. Коммитите изменённые файлы `*-patches/` в этот репозиторий.
+
+Собственные классы Amazake (не патчи) лежат в `amazake-server/src/main/java/ink/hoka/amazake/`.
 
 Отмечайте изменения в коде Minecraft и Paper комментариями `// Amazake - что и зачем`, а блоки — `// Amazake start - …` и `// Amazake end - …`. Так при обновлении Paper сразу видно, где наш код.
 

@@ -45,6 +45,13 @@ public final class AmazakeConfig {
     public static synchronized boolean reload() {
         final YamlConfiguration next = new YamlConfiguration();
         next.options().parseComments(true);
+        final boolean firstStart = !file.exists();
+        if (firstStart) {
+            LOGGER.info("*************************************************************************************");
+            LOGGER.info("This is the first time Amazake starts in this folder: it wrote " + FILE_NAME + ".");
+            LOGGER.info("Builds, source and documentation: " + Amazake.REPOSITORY);
+            LOGGER.info("*************************************************************************************");
+        }
         if (file.isFile()) {
             try {
                 next.load(file);
