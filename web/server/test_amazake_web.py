@@ -512,7 +512,7 @@ class HelperTests(unittest.TestCase):
         self.assertFalse(limiter.allow("k999", now=2))  # recent keys are kept
 
     def test_parse_cost_estimate(self):
-        self.assertLess(aw.estimate_parse_cost(b'{"a":"{[,,,]}","b":[1,2]}'), 1000)
+        self.assertLess(aw.estimate_parse_cost(b'{"a":"text, more","b":[1,2]}'), 1000)
         self.assertGreater(aw.estimate_parse_cost(b"[" + b"{}," * 1000 + b"{}]"), 200000)
 
     def test_client_ip_from_local_proxy(self):

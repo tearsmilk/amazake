@@ -13,6 +13,12 @@ import org.bukkit.Bukkit;
  * oldest first, the durations in nanoseconds of the ticks finished in the last ~5 seconds (Moonrise
  * TickData behind MinecraftServer#getMSPTData5s, read under the server's stats lock, so it is safe
  * off the main thread). The ticks of one interval are the last "ticks done" entries of that array.</p>
+ *
+ * <p>Approximation: "ticks done" counts started ticks, the array holds finished ones, so when a tick
+ * is in progress at one read and not at the next, an interval can take one tick too many or too few
+ * (the boundary tick may be counted in two neighbouring intervals). The Bukkit API exposes no finished
+ * tick counter to align on, so per-interval tick numbers are accurate to +-1 tick. The array covers
+ * only ~5 s, which is why profiler.interval-ms is capped in AmazakeConfig.</p>
  */
 final class TickSampler {
 

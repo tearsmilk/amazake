@@ -65,7 +65,8 @@ final class ProfilerSession implements Runnable {
             return;
         }
         Profiler.finished(this); // a new measurement may start while this report is sent
-        ReportOutput.deliver(report, this.sender);
+        // The profiler thread is a daemon: during shutdown the JVM may exit mid-upload, so save locally instead.
+        ReportOutput.deliver(report, this.sender, Bukkit.isStopping());
     }
 
     private Report measure() throws InterruptedException {
@@ -180,10 +181,23 @@ final class ProfilerSession implements Runnable {
         );
     }
 
-    /** Worlds at the end, with block entities; names only if the main thread does not answer. */
+    /**
+     * Worlds at the end, with block entities; names only if the main thread does not answer
+     * (or the server is stopping), and an empty list if even the names cannot be read.
+     */
     private List<Report.World> finalWorlds() {
-        final WorldSnapshots.Snapshot snapshot = this.worlds.take(true, 2 * MAIN_THREAD_WAIT_MS);
-        final List<WorldSnapshots.WorldStats> stats = snapshot != null ? snapshot.worlds() : WorldSnapshots.namesOnly();
+        final WorldSnapshots.Snapshot snapshot = Bukkit.isStopping() ? null : this.worlds.take(true, 2 * MAIN_THREAD_WAIT_MS);
+        List<WorldSnapshots.WorldStats> stats;
+        if (snapshot != null) {
+            stats = snapshot.worlds();
+        } else {
+            try {
+                stats = WorldSnapshots.namesOnly();
+            } catch (final RuntimeException e) { // worlds may be unloading during shutdown
+                Profiler.LOGGER.warning("Profiler could not list worlds: " + e);
+                stats = List.of();
+            }
+        }
         final List<Report.World> out = new ArrayList<>(stats.size());
         for (final WorldSnapshots.WorldStats world : stats) {
             out.add(new Report.World(world.name(), world.environment(), world.loadedChunks(), world.entities(),

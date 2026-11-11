@@ -41,11 +41,19 @@ final class ReportOutput {
     private ReportOutput() {
     }
 
-    static void deliver(final Report report, final CommandSender sender) {
+    /**
+     * @param serverStopping true when the server is shutting down: the report is only saved to profiles/,
+     *                       because the JVM may exit before a slow upload finishes and the report would be lost
+     */
+    static void deliver(final Report report, final CommandSender sender, final boolean serverStopping) {
         final byte[] json = GSON.toJson(report).getBytes(StandardCharsets.UTF_8);
         final String site = AmazakeConfig.profilerUploadUrl;
         String failure = null;
-        if (site != null && !site.isBlank()) {
+        if (serverStopping) {
+            if (site != null && !site.isBlank()) {
+                failure = "сервер выключается, отправка могла не успеть";
+            }
+        } else if (site != null && !site.isBlank()) {
             if (json.length > MAX_UPLOAD_BYTES) {
                 failure = "отчёт больше 8 МБ, сайт его не примет (уменьшите время замера или увеличьте profiler.interval-ms)";
             } else {

@@ -88,8 +88,9 @@ public final class AmazakeConfig {
             "Самый долгий замер /amazake profile, в секундах."));
         profilerDefaultSeconds = Math.min(profilerMaxSeconds, Math.max(1, integer("profiler.default-seconds", 30,
             "Длина замера /amazake profile без аргумента, в секундах.")));
-        profilerIntervalMs = Math.max(250, integer("profiler.interval-ms", 1000,
-            "Интервал между замерами, в миллисекундах (не меньше 250)."));
+        // Upper cap: Bukkit.getTickTimes() only keeps the last ~5 s of ticks (see profiler.TickSampler).
+        profilerIntervalMs = Math.min(4000, Math.max(250, integer("profiler.interval-ms", 1000,
+            "Интервал между замерами, в миллисекундах (от 250 до 4000).")));
 
         try {
             yaml.save(file);
