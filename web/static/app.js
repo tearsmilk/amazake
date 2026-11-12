@@ -2687,7 +2687,7 @@
 
     app.appendChild(el('div', { class: 'start' }, [
       el('div', { class: 'hero' }, [
-        el('img', { class: 'hero-logo', src: '/favicon.svg', alt: '', width: '56', height: '56' }),
+        el('img', { class: 'hero-logo', src: '/favicon.svg?v=41b24776', alt: '', width: '56', height: '56' }),
         el('h1', null, ['Amazake ', el('span', { class: 'accent-text', text: 'profiler' })]),
         el('p', { class: 'lead', text: 'Показывает, чем занят процессор сервера: главный поток, чанки, сеть, сборщик мусора, плагины — и что с этим делать.' }),
       ]),
