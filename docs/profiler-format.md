@@ -74,7 +74,7 @@ Rules:
 | `heapMaxBytes` | long | `-Xmx` |
 | `perCore` | bool | Whether `samples[].cores` holds per-core loads (Linux `/proc/stat`); false elsewhere |
 | `perThreadSource` | string | `"proc"` (Linux `/proc/self/task`: JVM-internal threads such as GC and JIT included) or `"jmx"` (Java threads only) |
-| `coreRoles` | string[], *optional* | The core layout's job of each logical core, one per entry of `samples[].cores` and in the same order (the N of `cpuN` in `/proc/stat`). Values: `tick` (main thread), `chunks` (chunk workers and chunk I/O), `network` (Netty), `gc` (GC, JIT, VM threads; stop-the-world GC workers run on every core but the reserve during a pause), `plugins` (plugin threads: the Bukkit and Folia async schedulers, async chat, tab completion, login and configuration pools that run plugin listeners, and threads plugins create themselves; they may also run on the `background` cores, with priority there), `background` (all other threads, the "support" core), `reserve` (a reserve core: kept empty, no thread of the server runs there; the main thread moves to it when its own core is busy with foreign load, see `migrations`); several roles on one core are joined with `+` in this order, e.g. `chunks+gc` and `network+background` (the automatic layouts for 2 to 4 cores always combine roles); `shared` means no role: an idle core (the tick core's SMT sibling) or one outside the CPUs the server may use. `reserve` is never combined with another role. Readers should split on `+` and treat unknown names as `shared`. The roles are those at the end of the measurement: after a move the old tick core is `reserve` and the reserve core it moved to is `tick`. Present only when `perCore` and a core layout (`amazake.yml` `cpu.layout`) is active |
+| `coreRoles` | string[], *optional* | The core layout's job of each logical core, one per entry of `samples[].cores` and in the same order (the N of `cpuN` in `/proc/stat`). Values: `tick` (main thread), `chunks` (chunk workers and chunk I/O), `network` (Netty), `gc` (GC, JIT, VM threads; stop-the-world GC workers run on every core but the reserve during a pause), `plugins` (plugin threads: the Bukkit and Folia async schedulers, async chat, tab completion, login and configuration pools that run plugin listeners, and threads plugins create themselves; they may also run on the `background` cores, with priority there), `background` (all other threads, the "support" core), `reserve` (a reserve core: kept empty, no thread of the server runs there; the main thread moves to it when its own core is busy with foreign load, see `migrations`); several roles on one core are joined with `+` in the order tick, chunks, network, gc, plugins, background, e.g. `chunks+gc`, `network+background` and `network+gc+background` (the automatic layouts for 2 to 4 cores always combine roles; `plugins` has a core of its own from 4 cores, see the README); `shared` means no role: an idle core (the tick core's SMT sibling) or one outside the CPUs the server may use. `reserve` is never combined with another role. Readers should split on `+` and treat unknown names as `shared`. The roles are those at the end of the measurement: after a move the old tick core is `reserve` and the reserve core it moved to is `tick`. Present only when `perCore` and a core layout (`amazake.yml` `cpu.layout`) is active |
 
 ## `samples[]`
 
@@ -133,12 +133,16 @@ Group ids, matched in this order on the thread name (first match wins):
 | `netty` | `Netty *` (network IO, compression, encryption) |
 | `gc` | `GC Thread*`, `G1 *`, `GC *`, `VM Thread`, `ZGC*`, `Shenandoah*` |
 | `jit` | `C1 CompilerThre*`, `C2 CompilerThre*`, `C1 Compiler*`, `C2 Compiler*` |
-| `plugins-async` | `Craft Scheduler Thread*`, `Folia Async Scheduler*` |
+| `plugins-async` | `Craft Scheduler Thread*`, `Folia Async Scheduler*`, `Craft Async Scheduler*` (the plugin schedulers' async pools) |
 | `chat` | `Async Chat Thread*`, `Async Tab Complete*` |
-| `paper-async` | `Paper Async *`, `Paper Plugin Remapper*`, `User Authenticator*`, `Configuration Thread*` |
+| `plugins-login` | `User Authenticator*`, `Configuration Thread*`, `Paper Async Command*` (pools that run plugins' async login, configuration and command-tree listeners) |
+| `paper-async` | `Paper Async *`, `Paper Plugin Remapper*`, and server threads that run no plugin code: `Server console *`, `Paper Watchdog *`, `Server Watchdog*`, `Timer hack thread*`, `Chat-Filter-Worker*`, `Download-*` |
 | `spark` | `spark-*` |
 | `amazake` | `Amazake *` (Amazake's own pools) |
+| `plugins-own` | not by name: threads plugins created themselves, found by the core layout (the thread's class or context class loader is a plugin's, or its stack has frames from a plugin jar). Only threads that matched no rule above; needs an active core layout on Linux. Older reports never have it |
 | `other` | everything else |
+
+Roles of the groups in the core layout (`coreRoles`): `main` → `tick`; `chunk-workers`, `chunk-io` → `chunks`; `netty` → `network`; `gc`, `jit` and the JVM's own threads → `gc`; `plugins-async`, `chat`, `plugins-login`, `plugins-own` → `plugins`; `paper-async`, `spark`, `amazake`, `other` → `background`.
 
 ## `lagSpikes[]`
 
@@ -248,7 +252,11 @@ plugin's task is charged to the listener's plugin, not twice):
 - `tasks`: sync scheduler tasks (`runTask`, `runTaskTimer`, `callSyncMethod`, the main-thread executor), Folia
   global/region tasks and entity tasks;
 - `events`: listeners of synchronous events;
-- `commands`: the plugin's command executors (Bukkit `PluginCommand`s).
+- `commands`: the plugin's command executors (Bukkit `PluginCommand`s and other `PluginIdentifiableCommand`s;
+  Brigadier commands registered through Paper's lifecycle API are not attributed).
+
+Main-thread times include server code the plugin's call runs (e.g. a block it sets); scheduler tasks run while
+the server is starting or paused also count.
 
 Off the main thread, `asyncCpuMsPerSecond` is the CPU time of the plugin's async scheduler tasks (Bukkit
 `runTaskAsynchronously` and Folia `AsyncScheduler`), measured per task on its thread.

@@ -1,0 +1,15 @@
+--- a/src/main/java/io/papermc/paper/command/brigadier/bukkit/BukkitCommandNode.java
++++ b/src/main/java/io/papermc/paper/command/brigadier/bukkit/BukkitCommandNode.java
+@@ -80,7 +_,12 @@
+             String[] args = org.apache.commons.lang3.StringUtils.split(content, ' '); // fix adjacent spaces (from console/plugins) causing empty array elements
+ 
+             // Note: we don't return the result of target.execute as thats success / failure, we return handled (true) or not handled (false)
++            final int amazake$token = ink.hoka.amazake.plugin.PluginTickStats.enabled() && this.command instanceof org.bukkit.command.PluginIdentifiableCommand amazake$owned ? ink.hoka.amazake.plugin.PluginTickStats.enter(amazake$owned.getPlugin(), ink.hoka.amazake.plugin.PluginTickStats.COMMANDS) : -1; // Amazake - plugin tick breakdown
++            try { // Amazake - plugin tick breakdown
+             this.command.execute(sender, this.literal, Arrays.copyOfRange(args, 1, args.length));
++            } finally { // Amazake - plugin tick breakdown
++                ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
++            } // Amazake - plugin tick breakdown
+ 
+             // return true as command was handled
+             return 1;

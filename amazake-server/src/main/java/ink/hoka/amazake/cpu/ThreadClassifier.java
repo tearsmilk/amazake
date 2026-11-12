@@ -1,6 +1,7 @@
 package ink.hoka.amazake.cpu;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * Sorts Linux threads into the profiler's thread groups by their kernel name ("comm" in
@@ -11,6 +12,12 @@ import java.util.List;
  * "Netty Epoll Server IO #0" is "Netty Epoll Ser", "C2 CompilerThread0" is "C2 CompilerThre".
  * Full names match as well. One extra group, {@value #JVM}, holds the JVM's own housekeeping threads
  * (reference handler, finalizer, signal dispatcher...); it goes with GC and JIT.</p>
+ *
+ * <p>Plugin work off the main thread goes to the {@link Role#PLUGINS} role: the scheduler's async pool
+ * ({@value #PLUGINS_ASYNC}), async chat and tab completion ({@value #CHAT}), the pools that run plugins'
+ * async login and configuration listeners ({@value #PLUGINS_LOGIN}) and threads plugins created themselves
+ * ({@value #PLUGINS_OWN}). That last group cannot be told by name: {@link PluginThreads} finds those threads
+ * by class loader and stack and passes their comms in to {@link #classify(String, Set)}.</p>
  */
 public final class ThreadClassifier {
 
@@ -23,6 +30,10 @@ public final class ThreadClassifier {
     public static final String JVM = "jvm";
     public static final String PLUGINS_ASYNC = "plugins-async";
     public static final String CHAT = "chat";
+    /** Pools that run plugins' async listeners during login and configuration, and async command building. */
+    public static final String PLUGINS_LOGIN = "plugins-login";
+    /** Threads plugins created themselves (found by {@link PluginThreads}, not by name). */
+    public static final String PLUGINS_OWN = "plugins-own";
     public static final String PAPER_ASYNC = "paper-async";
     public static final String SPARK = "spark";
     public static final String AMAZAKE = "amazake";
@@ -30,7 +41,7 @@ public final class ThreadClassifier {
 
     /** Every group, in the order /amazake cores lists them. */
     public static final List<String> GROUPS = List.of(MAIN, CHUNK_WORKERS, CHUNK_IO, NETTY, GC, JIT, JVM,
-        PLUGINS_ASYNC, CHAT, PAPER_ASYNC, SPARK, AMAZAKE, OTHER);
+        PLUGINS_ASYNC, CHAT, PLUGINS_LOGIN, PLUGINS_OWN, PAPER_ASYNC, SPARK, AMAZAKE, OTHER);
 
     /** Linux TASK_COMM_LEN - 1. */
     static final int COMM_LENGTH = 15;
@@ -81,12 +92,21 @@ public final class ThreadClassifier {
         new Rule(JVM, Kind.EXACT, "Attach Listener"),
         new Rule(PLUGINS_ASYNC, Kind.PREFIX, "Craft Scheduler"),
         new Rule(PLUGINS_ASYNC, Kind.PREFIX, "Folia Async Sch"),
+        new Rule(PLUGINS_ASYNC, Kind.PREFIX, "Craft Async Sch"), // "Craft Async Scheduler Management Thread"
         new Rule(CHAT, Kind.PREFIX, "Async Chat Thre"),
         new Rule(CHAT, Kind.PREFIX, "Async Tab Compl"),
+        new Rule(PLUGINS_LOGIN, Kind.PREFIX, "User Authentica"),
+        new Rule(PLUGINS_LOGIN, Kind.PREFIX, "Configuration T"),
+        new Rule(PLUGINS_LOGIN, Kind.PREFIX, "Paper Async Com"), // "Paper Async Command Builder Thread Pool"
         new Rule(PAPER_ASYNC, Kind.PREFIX, "Paper Async "),
         new Rule(PAPER_ASYNC, Kind.PREFIX, "Paper Plugin Re"),
-        new Rule(PAPER_ASYNC, Kind.PREFIX, "User Authentica"),
-        new Rule(PAPER_ASYNC, Kind.PREFIX, "Configuration T"),
+        // Server threads that run no plugin code. AffinityManager strips the comm, so no trailing spaces here.
+        new Rule(PAPER_ASYNC, Kind.PREFIX, "Server console"),
+        new Rule(PAPER_ASYNC, Kind.PREFIX, "Paper Watchdog"),
+        new Rule(PAPER_ASYNC, Kind.PREFIX, "Server Watchdog"),
+        new Rule(PAPER_ASYNC, Kind.PREFIX, "Timer hack thre"),
+        new Rule(PAPER_ASYNC, Kind.PREFIX, "Chat-Filter-Wor"),
+        new Rule(PAPER_ASYNC, Kind.PREFIX, "Download-"),
         new Rule(SPARK, Kind.PREFIX, "spark-"),
         new Rule(AMAZAKE, Kind.PREFIX, "Amazake ")
     );
@@ -96,6 +116,14 @@ public final class ThreadClassifier {
 
     /** The group of a thread by its comm (or full) name; {@value #OTHER} when no rule matches. */
     public static String classify(final String comm) {
+        return classify(comm, Set.of());
+    }
+
+    /**
+     * The group of a thread by its comm (or full) name: the name rules first, then {@value #PLUGINS_OWN}
+     * when {@code pluginComms} holds the comm (see {@link PluginThreads}), else {@value #OTHER}.
+     */
+    public static String classify(final String comm, final Set<String> pluginComms) {
         if (comm == null) {
             return OTHER;
         }
@@ -109,7 +137,7 @@ public final class ThreadClassifier {
                 return rule.group();
             }
         }
-        return OTHER;
+        return pluginComms != null && pluginComms.contains(comm) ? PLUGINS_OWN : OTHER;
     }
 
     /**
@@ -148,7 +176,13 @@ public final class ThreadClassifier {
          * Every CPU except tick's: worker gangs of the concurrent collectors (ZGC, Shenandoah), which
          * mostly run next to the main thread and must not crowd a single gc CPU.
          */
-        ALL_BUT_TICK
+        ALL_BUT_TICK,
+        /**
+         * Plugin threads: the plugins CPUs plus the support (background) CPUs, without the reserve and the
+         * tick's physical core. On the support CPUs plugin threads keep nice 0 while Paper's own background
+         * threads there run at a lower priority (cpu.layout.support-nice).
+         */
+        SUPPORT
     }
 
     /** How widely a thread with this comm is spread; see {@link Spread}. */
@@ -165,13 +199,27 @@ public final class ThreadClassifier {
         return Spread.ROLE;
     }
 
-    /** main -> tick; chunk-workers, chunk-io -> chunks; netty -> network; gc, jit, jvm -> gc; the rest -> background. */
+    /** {@link #spread(String)}, and {@link Spread#SUPPORT} for every thread of a {@link Role#PLUGINS} group. */
+    public static Spread spread(final String comm, final String group) {
+        final Spread byName = spread(comm);
+        if (byName == Spread.ROLE && group != null && roleOf(group) == Role.PLUGINS) {
+            return Spread.SUPPORT;
+        }
+        return byName;
+    }
+
+    /**
+     * main -> tick; chunk-workers, chunk-io -> chunks; netty -> network; gc, jit, jvm -> gc;
+     * plugins-async, chat, plugins-login, plugins-own -> plugins; the rest (paper-async, spark, amazake,
+     * other) -> background.
+     */
     public static Role roleOf(final String group) {
         return switch (group) {
             case MAIN -> Role.TICK;
             case CHUNK_WORKERS, CHUNK_IO -> Role.CHUNKS;
             case NETTY -> Role.NETWORK;
             case GC, JIT, JVM -> Role.GC;
+            case PLUGINS_ASYNC, CHAT, PLUGINS_LOGIN, PLUGINS_OWN -> Role.PLUGINS;
             default -> Role.BACKGROUND;
         };
     }

@@ -94,8 +94,9 @@ public final class CoreLayout {
 
     /**
      * The CPUs a thread of {@code role} gets: its role's, every allowed CPU but the reserve for
-     * stop-the-world GC workers, or those without tick's for concurrent GC workers (tick's when nothing
-     * else is left). Reserve CPUs are never in the answer: they stay empty.
+     * stop-the-world GC workers, those without tick's for concurrent GC workers (tick's when nothing
+     * else is left), or for plugin threads ({@link ThreadClassifier.Spread#SUPPORT}) {@link #supportCpus()}.
+     * Reserve CPUs are never in the answer: they stay empty.
      */
     public List<Integer> cpus(final Role role, final ThreadClassifier.Spread spread) {
         return switch (spread) {
@@ -106,7 +107,37 @@ public final class CoreLayout {
                 out.removeAll(this.cpus.get(Role.TICK));
                 yield out.isEmpty() ? this.usable() : List.copyOf(out);
             }
+            case SUPPORT -> role == Role.PLUGINS ? this.supportCpus() : this.cpus.get(role);
         };
+    }
+
+    /**
+     * Where plugin threads may run: the plugins CPUs plus the support (background) CPUs, without the
+     * reserve, the tick CPUs and their SMT siblings (plugin work never shares the main thread's physical
+     * core). The plugins CPUs alone when nothing else is left.
+     */
+    public List<Integer> supportCpus() {
+        final TreeSet<Integer> out = new TreeSet<>(this.cpus.get(Role.PLUGINS));
+        out.addAll(this.cpus.get(Role.BACKGROUND));
+        out.removeAll(this.reserve);
+        for (final int tick : this.cpus.get(Role.TICK)) {
+            out.remove(tick);
+            out.removeAll(this.siblingsOf(tick));
+        }
+        if (out.isEmpty()) {
+            return this.cpus.get(Role.PLUGINS);
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * Support CPUs plugin threads spill onto: {@link #supportCpus()} without the plugins' own CPUs; empty
+     * when plugins have no other CPUs (or share all of background's).
+     */
+    public List<Integer> spillCpus() {
+        final List<Integer> out = new ArrayList<>(this.supportCpus());
+        out.removeAll(this.cpus.get(Role.PLUGINS));
+        return List.copyOf(out);
     }
 
     /** Allowed CPUs without the reserve. */
@@ -200,7 +231,7 @@ public final class CoreLayout {
     }
 
     /**
-     * The one role this CPU belongs to ("tick", "chunks", "network", "gc", "background"),
+     * The one role this CPU belongs to ("tick", "chunks", "network", "gc", "plugins", "background"),
      * {@value #RESERVE} for a reserve CPU, or {@value #SHARED} when it belongs to several roles (small
      * machines), to none (an idle SMT sibling) or is outside the CPUs the server may use. Never null.
      */
@@ -250,7 +281,7 @@ public final class CoreLayout {
         return out;
     }
 
-    /** "tick=[0] chunks=[1-3] network=[4] gc=[5] background=[6-7]", plus " reserve=[7]" with a reserve. */
+    /** "tick=[0] chunks=[1] network=[4] gc=[2] plugins=[3] background=[4]", plus " reserve=[5]" with a reserve. */
     @Override
     public String toString() {
         final StringBuilder out = new StringBuilder();
@@ -276,6 +307,11 @@ public final class CoreLayout {
         if (!this.reserve.isEmpty()) {
             out.add(String.format("  %-10s [%s] - %s", RESERVE, CpuListParser.format(this.reserve),
                 "резерв: пустое ядро, сюда переезжает главный поток, если его ядро займёт кто-то чужой"));
+        }
+        final List<Integer> spill = this.spillCpus();
+        if (!spill.isEmpty()) {
+            out.add("  Потоки плагинов: [" + CpuListParser.format(this.supportCpus()) + "] - ядра plugins и ядро-подложка ["
+                + CpuListParser.format(spill) + "], где у них приоритет над фоном (cpu.layout.support-nice).");
         }
         final List<Integer> unused = this.unused();
         if (!unused.isEmpty()) {

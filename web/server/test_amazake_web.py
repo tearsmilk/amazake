@@ -188,6 +188,21 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(json.loads(body.decode("utf-8"))["system"]["coreRoles"],
                          ["tick", "chunks+gc", "network+background"])
 
+        # the plugins role (own core from 4 CPUs), the plugins block and samples[].pluginTicks are kept as sent
+        system = dict(system, logicalCores=4, coreRoles=["tick", "chunks+gc", "plugins", "network+background"])
+        samples = [dict(sample_report()["samples"][0], cores=[0.9, 0.4, 0.2, 0.1], pluginTicks=3.42)]
+        plugins = {"ticks": 600, "msPerTick": 3.42, "plugins": [
+            {"name": "AmazakeStress", "msPerTick": 3.42, "tasks": 3.3, "events": 0.12, "commands": 0.0,
+             "callsPerTick": 104.2, "asyncCpuMsPerSecond": 270.5}]}
+        report = sample_report(system=system, samples=samples, plugins=plugins)
+        status, _, body = upload(self.h, report)
+        self.assertEqual(status, 201, body)
+        status, _, body = self.h.request("GET", "/api/reports/" + json.loads(body)["id"])
+        kept = json.loads(body.decode("utf-8"))
+        self.assertEqual(kept["system"]["coreRoles"], ["tick", "chunks+gc", "plugins", "network+background"])
+        self.assertEqual(kept["plugins"], plugins)
+        self.assertEqual(kept["samples"][0]["pluginTicks"], 3.42)
+
         # a report without a layout (or from older servers) is still fine
         status, _, body = upload(self.h, sample_report())
         self.assertEqual(status, 201, body)

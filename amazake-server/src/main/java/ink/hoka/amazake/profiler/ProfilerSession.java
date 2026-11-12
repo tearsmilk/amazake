@@ -44,6 +44,11 @@ final class ProfilerSession implements Runnable {
     /** EntityTickStats snapshots: the session's first one and the last one a sample got. */
     private Map<String, Object> firstEntityTicks;
     private Map<String, Object> lastEntityTicks;
+    /** amazake.yml profiler.plugin-breakdown at the start: time plugins' main-thread work (the report's "plugins"). */
+    private final boolean pluginBreakdown = ink.hoka.amazake.AmazakeConfig.profilerPluginBreakdown;
+    /** PluginTickStats snapshots: the session's first one and the last one a sample got. */
+    private Map<String, Object> firstPluginTicks;
+    private Map<String, Object> lastPluginTicks;
 
     ProfilerSession(final CommandSender sender, final int seconds, final int intervalMs) {
         this.sender = sender;
@@ -66,6 +71,7 @@ final class ProfilerSession implements Runnable {
         try {
             report = this.measure();
             this.summarizeEntities(report);
+            this.summarizePlugins(report);
         } catch (final Throwable t) {
             Profiler.LOGGER.log(java.util.logging.Level.SEVERE, "Profiler failed", t);
             Profiler.finished(this);
@@ -90,12 +96,17 @@ final class ProfilerSession implements Runnable {
         if (this.entityBreakdown) {
             ink.hoka.amazake.tick.EntityTickStats.acquire();
         }
+        if (this.pluginBreakdown) {
+            ink.hoka.amazake.plugin.PluginTickStats.acquire();
+        }
         try {
-            if (this.entityBreakdown) {
-                // The baseline the first sample and the report's "entities" are counted from.
-                final WorldSnapshots.Snapshot baseline = this.worlds.take(false, true, MAIN_THREAD_WAIT_MS);
+            if (this.entityBreakdown || this.pluginBreakdown) {
+                // The baseline the first sample and the report's "entities" and "plugins" are counted from.
+                final WorldSnapshots.Snapshot baseline = this.worlds.take(false, this.entityBreakdown, this.pluginBreakdown, MAIN_THREAD_WAIT_MS);
                 this.firstEntityTicks = baseline == null ? null : baseline.entityTicks();
                 this.lastEntityTicks = this.firstEntityTicks;
+                this.firstPluginTicks = baseline == null ? null : baseline.pluginTicks();
+                this.lastPluginTicks = this.firstPluginTicks;
             }
             while (true) {
                 final long nextNs = Math.min(lastNs + intervalNs, deadlineNs);
@@ -112,6 +123,9 @@ final class ProfilerSession implements Runnable {
             if (this.entityBreakdown) {
                 ink.hoka.amazake.tick.EntityTickStats.release();
             }
+            if (this.pluginBreakdown) {
+                ink.hoka.amazake.plugin.PluginTickStats.release();
+            }
         }
         // At least 1 ms: a stop right after the start must not produce durationMs 0, which the site rejects (400).
         return this.build(Math.max(1L, TimeUnit.NANOSECONDS.toMillis(lastNs - startNs)));
@@ -127,7 +141,7 @@ final class ProfilerSession implements Runnable {
         this.readGc();
         final long heapUsed = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
         final int players = Bukkit.getOnlinePlayers().size();
-        final WorldSnapshots.Snapshot snapshot = this.worlds.take(false, this.entityBreakdown, MAIN_THREAD_WAIT_MS);
+        final WorldSnapshots.Snapshot snapshot = this.worlds.take(false, this.entityBreakdown, this.pluginBreakdown, MAIN_THREAD_WAIT_MS);
         Map<String, Object> entityTicks = null;
         if (snapshot != null && snapshot.entityTicks() != null) {
             if (this.firstEntityTicks == null) {
@@ -136,6 +150,15 @@ final class ProfilerSession implements Runnable {
                 entityTicks = ink.hoka.amazake.tick.EntityTickStats.sample(this.lastEntityTicks, snapshot.entityTicks());
             }
             this.lastEntityTicks = snapshot.entityTicks();
+        }
+        Double pluginTicks = null;
+        if (snapshot != null && snapshot.pluginTicks() != null) {
+            if (this.firstPluginTicks == null) {
+                this.firstPluginTicks = snapshot.pluginTicks(); // no baseline: count from here
+            } else {
+                pluginTicks = ink.hoka.amazake.plugin.PluginTickStats.sample(this.lastPluginTicks, snapshot.pluginTicks());
+            }
+            this.lastPluginTicks = snapshot.pluginTicks();
         }
 
         this.samples.add(new Report.Sample(
@@ -152,7 +175,8 @@ final class ProfilerSession implements Runnable {
             players,
             snapshot == null ? null : snapshot.entities(),
             snapshot == null ? null : snapshot.loadedChunks(),
-            entityTicks
+            entityTicks,
+            pluginTicks
         ));
     }
 
@@ -214,7 +238,8 @@ final class ProfilerSession implements Runnable {
             groupEntries,
             spikes,
             this.migrations(durationMs),
-            this.entityBreakdown ? ink.hoka.amazake.tick.EntityTickStats.summarize(this.firstEntityTicks, this.lastEntityTicks, 40) : null
+            this.entityBreakdown ? ink.hoka.amazake.tick.EntityTickStats.summarize(this.firstEntityTicks, this.lastEntityTicks, 40) : null,
+            this.pluginBreakdown ? ink.hoka.amazake.plugin.PluginTickStats.summarize(this.firstPluginTicks, this.lastPluginTicks, 50) : null
         );
     }
 
@@ -236,6 +261,34 @@ final class ProfilerSession implements Runnable {
                 + ms(((Number) loop.get("loop")).doubleValue()) + " мс на цикл сущностей)");
         } catch (final RuntimeException e) {
             Profiler.LOGGER.warning("Profiler could not summarize entity ticks: " + e);
+        }
+    }
+
+    /** One line about plugins on the main thread: "Плагины в главном потоке: 3.4 мс/тик (AmazakeStress 2.9, LuckPerms 0.3)". */
+    @SuppressWarnings("unchecked")
+    private void summarizePlugins(final Report report) {
+        final Map<String, Object> plugins = report.plugins();
+        if (plugins == null) {
+            return;
+        }
+        try {
+            final StringBuilder top = new StringBuilder();
+            int shown = 0;
+            for (final Map<String, Object> entry : (List<Map<String, Object>>) plugins.get("plugins")) {
+                final double msPerTick = ((Number) entry.get("msPerTick")).doubleValue();
+                if (shown == 3 || msPerTick < 0.05) {
+                    break; // sorted by msPerTick: the rest is smaller
+                }
+                top.append(shown == 0 ? " (" : ", ").append(entry.get("name")).append(' ').append(ms(msPerTick));
+                shown++;
+            }
+            if (shown > 0) {
+                top.append(')');
+            }
+            Messages.result(this.sender, "Плагины в главном потоке: " + ms(((Number) plugins.get("msPerTick")).doubleValue())
+                + " мс/тик" + top);
+        } catch (final RuntimeException e) {
+            Profiler.LOGGER.warning("Profiler could not summarize plugins: " + e);
         }
     }
 

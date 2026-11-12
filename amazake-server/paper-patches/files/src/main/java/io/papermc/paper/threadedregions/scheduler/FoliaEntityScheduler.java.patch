@@ -1,0 +1,18 @@
+--- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaEntityScheduler.java
++++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaEntityScheduler.java
+@@ -28,11 +_,14 @@
+                 // don't execute if the plugin is disabled
+                 return;
+             }
++            final int amazake$token = ink.hoka.amazake.plugin.PluginTickStats.enter(plugin, ink.hoka.amazake.plugin.PluginTickStats.TASKS); // Amazake - plugin tick breakdown
+             try {
+                 runnable.run();
+             } catch (final Throwable throwable) {
+                 plugin.getLogger().log(Level.WARNING, "Entity task for " + plugin.getDescription().getFullName() + " generated an exception", throwable);
+-            }
++            } finally { // Amazake - plugin tick breakdown
++                ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
++            } // Amazake - plugin tick breakdown
+         };
+     }
+ 

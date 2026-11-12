@@ -60,6 +60,18 @@ stress_from=0
 if [ -n "$stress_jar" ]; then
   stress_from=$(wc -l < server.log)
   send "stress run 40" 0
+  # /amazake cores again once the "async" module runs (from the "packets" stage on): its own worker threads
+  # ("AmazakeStress Worker #N", created by the plugin) must be found as plugins-own and moved to the plugins role.
+  for _ in $(seq 1 120); do
+    tail -n "+$((stress_from + 1))" server.log | grep -qE " 5 packets \(" && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  # A short /amazake profile during the run, once the "async" module runs: its "plugins" block must show the
+  # plugin's main-thread tasks/events and its async scheduler CPU.
+  send "amazake profile 5" 0
+  sleep 4
+  send "amazake cores" 0
   # World creation + 40 s of load + the upload; the plugin prints the link when the report is on the site.
   for _ in $(seq 1 300); do
     tail -n "+$((stress_from + 1))" server.log | grep -qE "AmazakeStress.*127\.0\.0\.1:$site_port/r/[A-Za-z0-9]+" && break
@@ -106,6 +118,13 @@ if [ "$cpus" -ge 2 ]; then
   check 'main \(tick\): [0-9]+ -> \[[0-9]+\]([^,]|$)' "/amazake cores shows the main thread on the tick core"
   # cpu.reserve is on by default: either reserve CPUs (auto: from 6 CPUs) or the reason there are none.
   check 'Резерв: (ядра \[[0-9,-]+\] пустые|нет \()' "/amazake cores prints the reserve line"
+  check 'Плагины: ' "/amazake cores prints the plugins line"
+  check 'Своих потоков плагинов найдено \(группа plugins-own\): [0-9]+' "/amazake cores counts plugin-created threads"
+  if [ "$cpus" -ge 4 ]; then
+    # From 4 CPUs the plugins have a core of their own.
+    check '[[:space:]][0-9]+  plugins[[:space:]]+[0-9]+%' "/amazake cores shows a core of the plugins role"
+    check 'Плагины: (ядро|ядра) \[[0-9,-]+\] целиком' "/amazake cores says the plugins core is theirs alone"
+  fi
 else
   check 'Amazake cores: disabled \(only [0-9]+ CPU' "the core layout says why it is off on $cpus CPU"
   check 'Раскладка ядер выключена' "/amazake cores says the layout is off"
@@ -134,10 +153,12 @@ if sysinfo["perCore"] and cpus >= 2:
     roles = sysinfo.get("coreRoles")
     assert isinstance(roles, list), "no system.coreRoles while the core layout is on"
     assert len(roles) == sysinfo["logicalCores"], "coreRoles %d entries, logicalCores %d" % (len(roles), sysinfo["logicalCores"])
-    known = {"tick", "chunks", "network", "gc", "background"}
+    known = {"tick", "chunks", "network", "gc", "plugins", "background", "reserve"}
     for role in roles:
         assert role == "shared" or set(role.split("+")) <= known, "unknown core role %r" % role
     assert roles.count("tick") == 1, "one tick core expected: %s" % roles
+    if cpus >= 4:
+        assert "plugins" in roles, "no core of the plugins role alone on %d CPUs: %s" % (cpus, roles)
     assert all(len(s["cores"]) == len(roles) for s in r["samples"] if s.get("cores")), "samples[].cores length"
 e = r.get("entities")
 assert isinstance(e, dict), "no entities block (entity tick breakdown)"
@@ -149,6 +170,11 @@ assert any(isinstance(s.get("entityTicks"), dict) for s in r["samples"]), "no sa
 assert all(isinstance(s.get("entities", 0), int) for s in r["samples"]), "samples[].entities must stay the entity count"
 print("entities: loop %.3f ms/tick, %s, top types %s" % (e["msPerTick"]["loop"],
     ", ".join("%s %.3f" % (c["class"], c["msPerTick"]) for c in e["classes"]), [t["type"] for t in e["types"][:5]]))
+p = r.get("plugins")
+assert isinstance(p, dict), "no plugins block (plugin tick breakdown)"
+assert p["ticks"] > 0 and isinstance(p["plugins"], list), p
+assert any("pluginTicks" in s for s in r["samples"]), "no samples[].pluginTicks"
+print("plugins: %.3f ms/tick, %s" % (p["msPerTick"], [(x["name"], x["msPerTick"]) for x in p["plugins"][:5]]))
 print("report: %d samples, %d threads, groups %s, %d cores, per-core %s, core roles %s" % (
     len(r["samples"]), len(r["threads"]), sorted(groups), sysinfo["logicalCores"], sysinfo["perCore"], sysinfo.get("coreRoles")))
 EOF
@@ -165,6 +191,12 @@ if [ -n "$stress_jar" ]; then
     stress_check " $stage \\(" "stage $stage started"
   done
   stress_check '\[max\] t=[0-9]+/40s' "the periodic status line reaches the max stage"
+  if [ "$cpus" -ge 2 ]; then
+    # The /amazake cores sent during the "packets" stage: the plugin's own worker threads are plugins-own.
+    stress_check 'plugins-own \(plugins\): [0-9]+ -> \[' "/amazake cores during the run puts plugin-created threads in plugins-own"
+    stress_check 'Своих потоков плагинов найдено \(группа plugins-own\): [1-9][0-9]* \(.*"AmazakeStress W"' \
+      "the AmazakeStress worker threads are found as plugin threads"
+  fi
   stress_check 'Run completed \(.*at tick 800/800' "the run went through all 800 ticks and stopped by itself"
   # A module that throws is disabled and logged at SEVERE with its stack trace; any trace through the plugin fails.
   if grep -nE 'at ink\.hoka\.amazake\.stress\.|Module [a-z]+ failed in |\[[a-z]+\] task failed|Cannot create module' server.log; then
@@ -212,6 +244,27 @@ for m in s["modules"]:
     print("  %s: %s" % (m["id"], m["status"]))
 EOF
     then echo "ok: the stress report is a valid profile with the full stage timeline"; else echo "BAD: the stress report"; fail=1; fi
+  fi
+  # The /amazake profile taken during the run (its own link line, not the plugin's).
+  # (colour codes sit between the prefix and the text, hence the .*)
+  pid2=$(grep -E "\[Профайлер\].*Отчёт готов:.*127\.0\.0\.1:$site_port/r/[A-Za-z0-9]+" stress.log | grep -v AmazakeStress \
+    | grep -oE "127\.0\.0\.1:$site_port/r/[A-Za-z0-9]+" | tail -1 | sed 's|.*/r/||' || true)
+  if [ -z "$pid2" ] || [ "$pid2" = "$amazake_id" ] || [ "$pid2" = "$sid" ]; then
+    echo "MISSING: /amazake profile during the stress run uploaded a report"; fail=1
+  else
+    curl -fsS "http://127.0.0.1:$site_port/api/reports/$pid2" -o during-stress.json
+    if python3 - during-stress.json <<'EOF'
+import json, sys
+r = json.load(open(sys.argv[1], encoding="utf-8"))
+p = r.get("plugins")
+assert isinstance(p, dict) and p["ticks"] > 0, "no plugins block: %s" % p
+row = next((x for x in p["plugins"] if x["name"] == "AmazakeStress"), None)
+assert row is not None, "AmazakeStress missing from plugins: %s" % [x["name"] for x in p["plugins"]]
+assert row["msPerTick"] > 0, row
+assert row["asyncCpuMsPerSecond"] > 0, row
+print("plugins during stress: %.3f ms/tick; AmazakeStress %s" % (p["msPerTick"], row))
+EOF
+    then echo "ok: /amazake profile during the run measured AmazakeStress (main thread and async CPU)"; else echo "BAD: the plugins block during the stress run"; fail=1; fi
   fi
 fi
 exit $fail

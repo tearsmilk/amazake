@@ -13,6 +13,7 @@ final class ThreadGroups {
     static final String NETTY = "netty";
     static final String GC = "gc";
     static final String JIT = "jit";
+    static final String PLUGINS_OWN = "plugins-own";
     static final String OTHER = "other";
 
     private record Rule(String group, List<Pattern> patterns) {
@@ -33,9 +34,12 @@ final class ThreadGroups {
         rule(NETTY, "Netty *"),
         rule(GC, "GC Thread*", "G1 *", "GC *", "VM Thread", "ZGC*", "Shenandoah*"),
         rule(JIT, "C1 CompilerThre*", "C2 CompilerThre*", "C1 Compiler*", "C2 Compiler*"),
-        rule("plugins-async", "Craft Scheduler Thread*", "Folia Async Scheduler*"),
+        rule("plugins-async", "Craft Scheduler Thread*", "Folia Async Scheduler*", "Craft Async Scheduler*"),
         rule("chat", "Async Chat Thread*", "Async Tab Complete*"),
-        rule("paper-async", "Paper Async *", "Paper Plugin Remapper*", "User Authenticator*", "Configuration Thread*"),
+        rule("plugins-login", "User Authenticator*", "Configuration Thread*", "Paper Async Command*"),
+        rule("paper-async", "Paper Async *", "Paper Plugin Remapper*",
+            // Server threads that run no plugin code.
+            "Server console *", "Paper Watchdog *", "Server Watchdog*", "Timer hack thread*", "Chat-Filter-Worker*", "Download-*"),
         rule("spark", "spark-*"),
         rule("amazake", "Amazake *")
     );
@@ -50,6 +54,18 @@ final class ThreadGroups {
             }
         }
         return OTHER;
+    }
+
+    /**
+     * {@link #classify(String)}, and {@value #PLUGINS_OWN} instead of {@value #OTHER} for a Java thread the
+     * core layout found to be created by a plugin (cpu.PluginThreads, by class loader and stack).
+     */
+    static String classify(final String name, final long javaId) {
+        final String group = classify(name);
+        if (OTHER.equals(group) && javaId >= 0L && ink.hoka.amazake.cpu.Cores.pluginThreadIds().contains(javaId)) {
+            return PLUGINS_OWN;
+        }
+        return group;
     }
 
     /** GC and JIT threads are not Java threads: their CPU is only visible in /proc. */

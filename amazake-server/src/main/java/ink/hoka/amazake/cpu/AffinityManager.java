@@ -41,6 +41,14 @@ import java.util.logging.Logger;
  * old tick CPU out of every thread's set (it is the new, empty reserve). A later {@link #setLayout} with the
  * same tick CPU (a /amazake reload) keeps the moved tick while its CPU is still a reserve CPU of the new
  * layout, so a reload does not pin the main thread back onto the contended CPU.</p>
+ *
+ * <p>Plugin threads (for this server, pid "self"): each scan asks {@link PluginThreads} which comms are
+ * threads plugins created themselves, so they join the plugins role. Plugin threads get
+ * {@link ThreadClassifier.Spread#SUPPORT}: the plugins CPUs plus the support (background) CPUs. When the
+ * layout lets them spill onto support CPUs, the support threads there that never run plugin code (spark,
+ * Amazake, Paper's own housekeeping, unknown threads seen for a while) get {@code renice -n <support-nice>}
+ * once, so plugin threads win the CPU about 3:1 at nice 5. Nice is only ever raised: without CAP_SYS_NICE
+ * it cannot be lowered back, so turning the layout off leaves it as it is.</p>
  */
 public final class AffinityManager {
 
@@ -91,8 +99,19 @@ public final class AffinityManager {
 
     private enum Outcome { OK, VANISHED, REFUSED, INVALID, FAILED }
 
-    private record Applied(String comm, String cpus) {
+    /**
+     * What a scan did to a thread.
+     *
+     * @param niced     whether its nice was raised to support-nice (or found at least that high)
+     * @param firstSeen System.nanoTime() of the first scan that saw this thread with this comm
+     */
+    private record Applied(String comm, String cpus, boolean niced, long firstSeen) {
     }
+
+    /** An unknown ("other") thread is reniced only after it has been watched this long (two stack checks). */
+    static final long OTHER_NICE_DELAY_MS = 2 * PluginThreads.RECHECK_SECONDS * 1000L + 5_000L;
+    /** cpu.layout.support-nice by default. */
+    public static final int DEFAULT_SUPPORT_NICE = 5;
 
     private final Path tasks;
     private volatile String fullSet;
@@ -111,6 +130,12 @@ public final class AffinityManager {
 
     // Owned by the worker thread.
     private final Map<Integer, Applied> applied = new HashMap<>();
+    /** Finds plugin-created threads; null when this manager pins another process. */
+    private final PluginThreads pluginThreads;
+    /** Why renice cannot be used (logged once), or null. */
+    private String niceProblem;
+    private boolean everNiced;
+    private boolean niceKeptLogged;
     private boolean pinned;
     private boolean otherFailureLogged;
     private boolean replanned;
@@ -128,6 +153,9 @@ public final class AffinityManager {
     private volatile String failure;
     private volatile int scans;
     private volatile ReserveSettings reserveSettings = ReserveSettings.OFF;
+    private volatile int supportNice = DEFAULT_SUPPORT_NICE;
+    private volatile int nicedThreads;
+    private volatile String niceProblemRu;
     private volatile ReserveCheck reserveCheck;
     /** Why the reserve check cannot measure or move right now, in Russian; null when it can. */
     private volatile String reserveStatusRu;
@@ -142,6 +170,36 @@ public final class AffinityManager {
         this.tasks = Path.of("/proc", pid, "task");
         this.fullSet = CpuListParser.format(fullSet);
         this.publishCurrent = publishCurrent;
+        this.pluginThreads = "self".equals(pid) ? new PluginThreads() : null;
+    }
+
+    /** cpu.layout.support-nice (0..19; 0: no priorities). Takes effect for threads not reniced yet. */
+    public void setSupportNice(final int nice) {
+        this.supportNice = Math.max(0, Math.min(19, nice));
+    }
+
+    public int supportNice() {
+        return this.supportNice;
+    }
+
+    /** How many live threads run at support-nice now (reniced by us or found so). */
+    public int nicedThreads() {
+        return this.nicedThreads;
+    }
+
+    /** Why priorities are not set (renice missing or refused), in Russian; null when they work. */
+    public String niceProblemRu() {
+        return this.niceProblemRu;
+    }
+
+    /** Plugin-created threads the last scan found ({@link ThreadClassifier#PLUGINS_OWN}); 0 for another process. */
+    public int pluginThreadCount() {
+        return this.pluginThreads == null ? 0 : this.pluginThreads.count();
+    }
+
+    /** Java thread ids of plugin-created threads, for the profiler's thread groups. */
+    public java.util.Set<Long> pluginThreadIds() {
+        return this.pluginThreads == null ? java.util.Set.of() : this.pluginThreads.javaIds();
     }
 
     /**
@@ -614,7 +672,8 @@ public final class AffinityManager {
 
     private String readStat(final int tid) {
         try {
-            return Files.readString(this.tasks.resolve(Integer.toString(tid)).resolve("stat"), StandardCharsets.UTF_8);
+            // Lenient decode: stat holds the comm, which may end inside a character (see readComm).
+            return new String(Files.readAllBytes(this.tasks.resolve(Integer.toString(tid)).resolve("stat")), StandardCharsets.UTF_8);
         } catch (final IOException | RuntimeException e) {
             return null;
         }
@@ -650,17 +709,26 @@ public final class AffinityManager {
         }
         final List<PinnedThread> seen = new ArrayList<>();
         final Set<Integer> alive = new HashSet<>();
+        final Set<String> pluginComms = this.pluginThreads == null ? Set.of() : this.pluginThreads.refresh();
+        // Priorities matter only where plugin threads share CPUs with support threads.
+        final int nice = this.supportNice;
+        final boolean prioritize = layout != null && nice > 0 && this.niceProblem == null && !layout.spillCpus().isEmpty();
+        final long now = System.nanoTime();
+        int niced = 0;
         for (final int tid : this.listTids()) {
             final String comm = this.readComm(tid);
             if (comm == null) {
                 continue; // ended while listing
             }
-            final String group = ThreadClassifier.classify(comm);
+            final String group = ThreadClassifier.classify(comm, pluginComms);
             final Role role = ThreadClassifier.roleOf(group);
-            final String wanted = layout == null ? null : CpuListParser.format(layout.cpus(role, ThreadClassifier.spread(comm)));
+            final String wanted = layout == null ? null : CpuListParser.format(layout.cpus(role, ThreadClassifier.spread(comm, group)));
             final Applied previous = this.applied.get(tid);
+            final boolean sameThread = previous != null && previous.comm().equals(comm);
+            final long firstSeen = sameThread ? previous.firstSeen() : now;
+            boolean isNiced = sameThread && previous.niced();
             String current;
-            if (wanted != null && previous != null && previous.comm().equals(comm) && previous.cpus().equals(wanted)) {
+            if (wanted != null && sameThread && previous.cpus().equals(wanted)) {
                 current = wanted;
             } else {
                 current = this.readMask(tid);
@@ -697,13 +765,25 @@ public final class AffinityManager {
                     }
                 }
                 if (wanted != null && wanted.equals(current)) {
-                    this.applied.put(tid, new Applied(comm, wanted));
+                    this.applied.put(tid, new Applied(comm, wanted, isNiced, firstSeen));
                 }
+            }
+            if (prioritize && !isNiced && wanted != null && wanted.equals(current) && role == Role.BACKGROUND
+                && demotable(comm, group) && (!ThreadClassifier.OTHER.equals(group)
+                    || now - firstSeen >= TimeUnit.MILLISECONDS.toNanos(OTHER_NICE_DELAY_MS))) {
+                isNiced = this.raiseNice(tid, comm, nice);
+                if (isNiced) {
+                    this.applied.put(tid, new Applied(comm, wanted, true, firstSeen));
+                }
+            }
+            if (isNiced) {
+                niced++;
             }
             alive.add(tid);
             seen.add(new PinnedThread(tid, comm, group, role, current));
         }
         this.applied.keySet().retainAll(alive);
+        this.nicedThreads = niced;
         this.snapshot = List.copyOf(seen);
         this.scans++;
         return true;
@@ -771,8 +851,104 @@ public final class AffinityManager {
         }
         this.applied.clear();
         this.pinned = false;
+        if (this.everNiced && !this.niceKeptLogged) {
+            this.niceKeptLogged = true;
+            LOGGER.info("Раскладка ядер: приоритеты фоновых потоков (nice) оставлены как есть - без права CAP_SYS_NICE"
+                + " понизить nice обратно нельзя. Вернутся к 0 после перезапуска сервера.");
+        }
         this.publish(null);
         this.scan(null);
+    }
+
+    /**
+     * Whether a support thread of this group may run at a lower priority: Paper's own housekeeping, spark,
+     * Amazake and unknown threads, but never threads that may run plugin callbacks ("Paper Async Task
+     * Handler", the JDK common pool and other ForkJoinPools that CompletableFuture.supplyAsync and parallel
+     * streams use implicitly) or must not be slowed down (the watchdogs). Excluding the ForkJoinPool workers
+     * also keeps new workers, which inherit the nice of the worker that spawns them, at nice 0.
+     */
+    static boolean demotable(final String comm, final String group) {
+        return switch (group) {
+            case ThreadClassifier.SPARK, ThreadClassifier.AMAZAKE -> true;
+            case ThreadClassifier.OTHER -> !comm.startsWith("ForkJoinPool");
+            case ThreadClassifier.PAPER_ASYNC -> !comm.startsWith("Paper Async Tas") && !comm.startsWith("Paper Watchdog")
+                && !comm.startsWith("Server Watchdog");
+            default -> false;
+        };
+    }
+
+    /** Nice of a thread: field 19 of /proc/PID/task/TID/stat; Integer.MIN_VALUE when unknown. */
+    static int niceOf(final String stat) {
+        if (stat == null) {
+            return Integer.MIN_VALUE;
+        }
+        final int close = stat.lastIndexOf(')');
+        if (close < 0) {
+            return Integer.MIN_VALUE;
+        }
+        final String[] fields = stat.substring(close + 1).trim().split("\\s+");
+        // fields[0] is field 3 (state), so field 19 (nice) is fields[16].
+        if (fields.length < 17) {
+            return Integer.MIN_VALUE;
+        }
+        try {
+            return Integer.parseInt(fields[16]);
+        } catch (final NumberFormatException e) {
+            return Integer.MIN_VALUE;
+        }
+    }
+
+    /**
+     * Raises the thread's nice to {@code nice} unless it is at least that already. Never lowers it.
+     * Returns whether the thread now runs at {@code nice} or higher.
+     */
+    private boolean raiseNice(final int tid, final String comm, final int nice) {
+        final int current = niceOf(this.readStat(tid));
+        if (current == Integer.MIN_VALUE) {
+            return false; // gone
+        }
+        if (current >= nice) {
+            return true;
+        }
+        final Process process;
+        try {
+            process = command("renice", "-n", Integer.toString(nice), "-p", Integer.toString(tid)).start();
+        } catch (final IOException e) {
+            this.niceFailed("не запускается команда renice (пакет util-linux): " + e.getMessage());
+            return false;
+        }
+        try (var stdout = process.getInputStream()) {
+            process.getOutputStream().close();
+            if (!process.waitFor(TASKSET_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly();
+                this.niceFailed("renice не ответил за " + TASKSET_TIMEOUT_MS + " мс");
+                return false;
+            }
+            final String out = new String(stdout.readAllBytes(), StandardCharsets.UTF_8).strip();
+            if (process.exitValue() == 0) {
+                this.everNiced = true;
+                return true;
+            }
+            if (out.toLowerCase(Locale.ROOT).contains("no such process") || !Files.isDirectory(this.tasks.resolve(Integer.toString(tid)))) {
+                return false;
+            }
+            this.niceFailed("renice -n " + nice + " для потока " + tid + " (" + comm + "): " + (out.isEmpty() ? "код " + process.exitValue() : out));
+            return false;
+        } catch (final IOException e) {
+            this.niceFailed("renice: " + e.getMessage());
+            return false;
+        } catch (final InterruptedException e) {
+            process.destroyForcibly();
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    private void niceFailed(final String why) {
+        this.niceProblem = why;
+        this.niceProblemRu = why;
+        LOGGER.warning("Раскладка ядер: приоритеты потоков не выставляются (" + why + "). Потоки плагинов делят"
+            + " ядро-подложку с фоном на равных; остальное работает как обычно.");
     }
 
     private void publish(final CoreLayout layout) {
@@ -801,7 +977,9 @@ public final class AffinityManager {
 
     private String readComm(final int tid) {
         try {
-            return Files.readString(this.tasks.resolve(Integer.toString(tid)).resolve("comm"), StandardCharsets.UTF_8).strip();
+            // Bytes, not readString: the kernel cuts a non-ASCII name inside a character, which readString rejects.
+            final byte[] bytes = Files.readAllBytes(this.tasks.resolve(Integer.toString(tid)).resolve("comm"));
+            return PluginThreads.decodeComm(bytes, bytes.length);
         } catch (final IOException | RuntimeException e) {
             return null;
         }
@@ -810,7 +988,9 @@ public final class AffinityManager {
     /** The thread's CPU list in canonical form, or null when the thread is gone. */
     private String readMask(final int tid) {
         try {
-            for (final String line : Files.readAllLines(this.tasks.resolve(Integer.toString(tid)).resolve("status"), StandardCharsets.UTF_8)) {
+            // Lenient decode: the Name: line holds the comm, which may end inside a character (see readComm).
+            final String status = new String(Files.readAllBytes(this.tasks.resolve(Integer.toString(tid)).resolve("status")), StandardCharsets.UTF_8);
+            for (final String line : status.split("\n")) {
                 if (line.startsWith("Cpus_allowed_list:")) {
                     return CpuListParser.format(CpuListParser.parse(line.substring("Cpus_allowed_list:".length()).trim()));
                 }

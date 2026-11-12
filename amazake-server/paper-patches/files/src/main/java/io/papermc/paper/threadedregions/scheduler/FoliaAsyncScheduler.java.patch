@@ -1,0 +1,16 @@
+--- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
++++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaAsyncScheduler.java
+@@ -212,11 +_,13 @@
+                 return;
+             }
+ 
++            final long amazake$cpu = ink.hoka.amazake.plugin.PluginTickStats.asyncStart(); // Amazake - plugin tick breakdown
+             try {
+                 this.run.accept(this);
+             } catch (final Throwable throwable) {
+                 this.plugin.getLogger().log(Level.WARNING, "Async task for " + this.plugin.getDescription().getFullName() + " generated an exception", throwable);
+             } finally {
++                ink.hoka.amazake.plugin.PluginTickStats.asyncEnd(this.plugin, amazake$cpu); // Amazake - plugin tick breakdown
+                 boolean removeFromTasks = false;
+                 synchronized (this) {
+                     if (!repeating) {

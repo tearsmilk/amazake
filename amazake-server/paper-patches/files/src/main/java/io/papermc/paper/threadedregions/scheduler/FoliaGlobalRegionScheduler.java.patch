@@ -1,0 +1,16 @@
+--- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java
++++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java
+@@ -174,11 +_,13 @@
+                 return;
+             }
+ 
++            final int amazake$token = ink.hoka.amazake.plugin.PluginTickStats.enter(this.plugin, ink.hoka.amazake.plugin.PluginTickStats.TASKS); // Amazake - plugin tick breakdown
+             try {
+                 this.run.accept(this);
+             } catch (final Throwable throwable) {
+                 this.plugin.getLogger().log(Level.WARNING, "Global task for " + this.plugin.getDescription().getFullName() + " generated an exception", throwable);
+             } finally {
++                ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
+                 boolean reschedule = false;
+                 if (!repeating) {
+                     this.setStateVolatile(STATE_FINISHED);

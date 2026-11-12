@@ -22,7 +22,9 @@
     'gc': 'Сборщик мусора',
     'jit': 'JIT-компилятор',
     'plugins-async': 'Плагины (асинхронно)',
-    'chat': 'Чат',
+    'chat': 'Чат и подсказки команд',
+    'plugins-login': 'Плагины (вход и настройка игроков)',
+    'plugins-own': 'Свои потоки плагинов',
     'paper-async': 'Paper (прочее асинхронное)',
     'spark': 'spark',
     'amazake': 'Amazake',
@@ -47,12 +49,15 @@
     chunks: { short: 'чанки', name: 'Чанки', color: 'var(--s2)', groups: ['chunk-workers', 'chunk-io'] },
     network: { short: 'сеть', name: 'Сеть (Netty)', color: 'var(--s3)', groups: ['netty'] },
     gc: { short: 'GC', name: 'GC и JIT', color: 'var(--s4)', groups: ['gc', 'jit'] },
-    background: { short: 'фон', name: 'Фоновые потоки', color: 'var(--s5)', groups: null }, // every other group
+    // Plugin threads (async schedulers, chat, login pools, threads plugins made); they may spill onto background cores.
+    plugins: { short: 'плагины', name: 'Плагины (асинхронные задачи, чат, потоки плагинов)', color: 'var(--s5)', groups: ['plugins-async', 'chat', 'plugins-login', 'plugins-own'] },
+    // The "support" core: every group no role present in the layout claims (see roleHasGroup).
+    background: { short: 'фон', name: 'Поддержка (фоновые потоки)', color: 'var(--s7)', groups: null },
     // Kept empty for the main thread to move to (amazake.yml cpu.reserve); no thread group runs there.
     reserve: { short: 'резерв', name: 'Резерв (пустое ядро для переезда тика)', color: 'var(--s6)', groups: [] },
     shared: { short: 'общее', name: 'Без роли', color: REST_COLOR, groups: [] },
   };
-  const ROLE_ORDER = ['tick', 'chunks', 'network', 'gc', 'background', 'reserve', 'shared'];
+  const ROLE_ORDER = ['tick', 'chunks', 'network', 'gc', 'plugins', 'background', 'reserve', 'shared'];
   /** Most migrations[] entries the viewer reads. */
   const MAX_MIGRATIONS = 200;
 
@@ -370,6 +375,7 @@
     }
     const pools = isObj(server.threadPools) ? server.threadPools : {};
     const entities = normEntities(raw.entities);
+    const plugins = normPlugins(raw.plugins);
 
     return {
       raw: raw,
@@ -438,6 +444,10 @@
         other: samples.map((s) => (isObj(s.entityTicks) ? nonNeg(s.entityTicks.other) : null)),
         player: samples.map((s) => (isObj(s.entityTicks) ? nonNeg(s.entityTicks.player) : null)),
       },
+      // The optional top-level `plugins` object (main-thread time per plugin; R.server.plugins is the installed list)
+      pluginBreakdown: plugins,
+      // samples[].pluginTicks: all plugins' main-thread ms per tick; null where a sample has none
+      pluginTicks: plugins ? samples.map((s) => nonNeg(s.pluginTicks)) : new Array(n).fill(null),
       stress: normStress(raw.stress),
       group: function (id) { return groups.find((g) => g.id === id) || null; },
     };
@@ -515,6 +525,36 @@
       loop: loop, ear: ear, despawn: despawn, overhead: overhead,
       classes: out3,
       types: types,
+    };
+  }
+
+  /** Most plugins.plugins[] entries the viewer reads (the server writes at most 50). */
+  const MAX_PLUGIN_ROWS = 200;
+  const PLUGIN_KINDS = ['tasks', 'events', 'commands'];
+
+  /**
+   * The optional top-level `plugins` object (docs/profiler-format.md), or null. Rows are sorted by main-thread
+   * time, then by async CPU; a row's msPerTick falls back to the sum of its kinds, the total to the sum of rows.
+   */
+  function normPlugins(raw) {
+    if (!isObj(raw)) return null;
+    const rows = arr(raw.plugins).filter(isObj).slice(0, MAX_PLUGIN_ROWS).map((p) => {
+      const row = { name: str(p.name, '?', 64) || '?' };
+      for (const k of PLUGIN_KINDS) row[k] = nonNeg(p[k]) || 0;
+      const ms = nonNeg(p.msPerTick);
+      row.msPerTick = ms !== null ? ms : row.tasks + row.events + row.commands;
+      row.callsPerTick = nonNeg(p.callsPerTick);
+      row.asyncCpuMsPerSecond = nonNeg(p.asyncCpuMsPerSecond);
+      return row;
+    }).sort((a, b) => (b.msPerTick - a.msPerTick) || ((b.asyncCpuMsPerSecond || 0) - (a.asyncCpuMsPerSecond || 0)));
+    let total = nonNeg(raw.msPerTick);
+    if (total === null) total = sum(rows.map((r) => r.msPerTick));
+    const ticks = numOrNull(raw.ticks);
+    return {
+      ticks: ticks === null ? null : Math.max(0, Math.round(ticks)),
+      msPerTick: total,
+      asyncCpuMsPerSecond: sum(rows.map((r) => r.asyncCpuMsPerSecond || 0)),
+      plugins: rows,
     };
   }
 
@@ -949,7 +989,7 @@
       // With a core layout every row gets a role chip (and a colour strip, also on rows without a label).
       const compact = W < 560;
       const numW = compact ? 22 : 52;
-      const chipW = roles && roles.some((v) => v.indexOf('+') >= 0) ? 66 : roles && roles.indexOf('reserve') >= 0 ? 46 : 40;
+      const chipW = roles ? roleChipWidth(roles) : 0;
       const ml = roles ? numW + chipW + 18 : 58, mr = 8, mt = 4, mb = 26;
       const pw = Math.max(40, W - ml - mr);
       const H = mt + rows * cellH + mb;
@@ -1302,6 +1342,18 @@
       }
     }
 
+    // Plugins (optional plugins object): their main-thread work takes a large share of the tick
+    const P = R.pluginBreakdown;
+    if (P && P.msPerTick >= 5 && msptAvg !== null && msptAvg > 0 && P.msPerTick / msptAvg >= 0.2) {
+      const share = P.msPerTick / msptAvg;
+      const top = P.plugins.filter((p) => p.msPerTick > 0).slice(0, 3).map((p) => p.name + ' — ' + fmtMsTick(p.msPerTick) + ' мс');
+      add(share >= 0.3 && msptAvg >= 40 ? 'warning' : 'info',
+        'Плагины занимают ' + fmtPct(share) + ' тика: ' + fmtMsTick(P.msPerTick) + ' мс из ' + fmtMs(msptAvg),
+        (top.length ? 'Больше всего: ' + top.join('; ') + '. ' : '') +
+        'Синхронные задачи, слушатели событий и команды плагинов выполняются в главном потоке (так плагины не устраивают гонок данных с тиком), поэтому их время прибавляется к каждому тику. ' +
+        'Разбор по плагинам и видам работы — во вкладке «Плагины». Проверьте настройки этих плагинов (частоту задач, тяжёлые слушатели) или найдите им замену.');
+    }
+
     // GC
     const gcTotal = sum(R.gcTimeMs);
     const gcShare = R.durationMs > 0 ? gcTotal / R.durationMs : 0;
@@ -1462,6 +1514,19 @@
     return (idx.length === 1 ? 'ядро ' : 'ядра ') + fmtCoreList(idx);
   }
 
+  /** Long role name; with a plugins role the background cores are also where plugin threads spill over. */
+  function roleTitle(id, hasPlugins) {
+    if (id === 'background' && hasPlugins) return 'Поддержка: фон, сюда с приоритетом переливаются потоки плагинов';
+    return CORE_ROLES[id].name;
+  }
+
+  /** Pixel width that fits the longest role label of a layout («сеть+плагины+фон»), for chip columns. */
+  function roleChipWidth(roles) {
+    let len = 0;
+    for (const v of roles) len = Math.max(len, roleInfo(v).short.length);
+    return Math.round(clamp(len * 6.2 + 8, 40, 116));
+  }
+
   /** Small coloured role label («тик», «чанки», ...). */
   function roleChip(role) {
     const info = roleInfo(role);
@@ -1470,11 +1535,16 @@
     return c;
   }
 
-  /** Whether thread group {@code group} runs on the cores of {@code role}. */
-  function roleHasGroup(role, group) {
+  /**
+   * Whether thread group {@code group} runs on the cores of {@code role}. {@code present} lists the roles of the
+   * layout: background takes every group no present role claims, so in older layouts without a plugins role
+   * the plugin groups still count for background.
+   */
+  function roleHasGroup(role, group, present) {
     const gs = CORE_ROLES[role].groups;
     if (gs) return gs.indexOf(group) >= 0;
     for (const id of ROLE_ORDER) {
+      if (present && present.indexOf(id) < 0) continue;
       const other = CORE_ROLES[id].groups;
       if (other && other.indexOf(group) >= 0) return false;
     }
@@ -1490,6 +1560,7 @@
     if (!roles) return null;
     const avg = coreAverages(R);
     const out = [];
+    const present = ROLE_ORDER.filter((id) => roles.some((v) => roleParts(v).indexOf(id) >= 0));
     for (const id of ROLE_ORDER) {
       const cores = [];
       // A core with several roles ("chunks+gc") counts for each of them.
@@ -1502,7 +1573,7 @@
       let threadCores = null;
       if (id !== 'shared' && id !== 'reserve') {
         threadCores = 0;
-        for (const g of R.groups) if (roleHasGroup(id, g.id)) threadCores += g.avgCores;
+        for (const g of R.groups) if (roleHasGroup(id, g.id, present)) threadCores += g.avgCores;
       }
       out.push({ id: id, cores: cores, avgLoad: busy / cores.length, busyCores: busy, peakLoad: maxOf(loads) || 0, threadCores: threadCores });
     }
@@ -1539,6 +1610,34 @@
           tickName + ' (' + fmtCoreList(tick.cores) + ') отдано главному потоку и загружено в среднем на ' + fmtCores(tick.busyCores) + ', а сам главный поток занимал ' + fmtCores(main.avgCores) + '. ' +
           'Остальное — чужая нагрузка: раскладка закрепляет только потоки сервера, а другие процессы машины (Discord-бот, база данных, бэкап) система может запускать на этом же ядре и отнимать время у тиков. ' +
           'Проверьте /amazake cores на сервере и top или htop на машине (столбец P — ядро процесса). Посторонний процесс можно перенести на ядра фона командой taskset -a -p -c <ядра> <pid>.');
+      }
+    }
+    const pl = by.plugins;
+    if (pl && pl.avgLoad >= 0.85) {
+      // Plugin threads may also run on the support (background) cores, with priority there,
+      // so their own cores being full is only a problem when the support cores are full too.
+      const bg = by.background;
+      const spill = bg ? bg.cores.filter((k) => pl.cores.indexOf(k) < 0) : [];
+      const head = 'Ядрам роли «' + CORE_ROLES.plugins.short + '» тесно: загружены в среднем на ' + fmtPct(pl.avgLoad);
+      const own = 'Под потоки плагинов отдано ' + pl.cores.length + ' ' + coresWord(pl.cores.length) + ' (' + fmtCoreList(pl.cores) + '), они заняли ' + fmtCores(pl.threadCores) + (spill.length ? ' (вместе с тем, что ушло на ядра поддержки)' : '') + '. ';
+      if (spill.length) {
+        const avg = coreAverages(R);
+        const spillLoad = sum(spill.map((k) => avg[k] || 0)) / spill.length;
+        const where = 'Когда своих ядер не хватает, потоки плагинов переливаются на ядра поддержки (' + fmtCoreList(spill) + '); там они делят время с фоновыми потоками, но получают его в первую очередь. ';
+        if (spillLoad >= 0.85) {
+          add(pl.avgLoad >= 0.95 && spillLoad >= 0.95 ? 'serious' : 'warning', head + ', ядра поддержки тоже (' + fmtPct(spillLoad) + ')',
+            own + where + 'Сейчас и они загружены на ' + fmtPct(spillLoad) + ', так что асинхронным задачам плагинов ждать очереди. ' +
+            'Дайте плагинам больше ядер в amazake.yml (cpu.layout.plugins, а если тесно и фону — cpu.layout.background) и выполните /amazake reload, или верните там "auto".');
+        } else {
+          add('info', head,
+            own + where + 'Ядра поддержки загружены на ' + fmtPct(spillLoad) + ', запас там есть, поэтому плагины пока не ждут. ' +
+            'Если нагрузка плагинов растёт, дайте им больше ядер в amazake.yml (cpu.layout.plugins) и выполните /amazake reload.');
+        }
+      } else {
+        // Combined layout (2-3 cores): the plugin cores already are the support cores, nowhere to spill.
+        add(pl.avgLoad >= 0.95 ? 'serious' : 'warning', head,
+          own + (bg ? 'Ядра поддержки здесь те же самые, так что переливаться потокам плагинов некуда' : 'Ядер поддержки в раскладке нет, так что переливаться потокам плагинов некуда') + ': пока эти ядра заняты, они ждут очереди. ' +
+          'Дайте плагинам больше ядер в amazake.yml (cpu.layout.plugins) и выполните /amazake reload, или верните там "auto".');
       }
     }
     for (const id of ['chunks', 'network', 'gc', 'background']) {
@@ -1972,8 +2071,9 @@
   function layoutTableCard(R) {
     const stats = layoutStats(R);
     if (!stats) return null;
+    const hasPlugins = stats.some((r) => r.id === 'plugins');
     const columns = [
-      { label: 'Роль', render: (r) => el('span', { class: 'role-cell' }, [roleChip(r.id), el('span', { class: 'role-name', text: CORE_ROLES[r.id].name })]) },
+      { label: 'Роль', render: (r) => el('span', { class: 'role-cell' }, [roleChip(r.id), el('span', { class: 'role-name', text: roleTitle(r.id, hasPlugins) })]) },
       { label: 'Ядра', cls: 'mono nowrap', render: (r) => fmtCoreList(r.cores) },
       { label: 'Загрузка ядер', short: 'Загрузка', cls: 'num', render: (r) => {
         const m = el('div', { class: 'meter' });
@@ -2029,6 +2129,8 @@
       const roles = R.system.coreRoles;
       const combined = roles && roles.some((v) => v.indexOf('+') >= 0);
       const bars = el('div', { class: 'core-bars' + (roles ? ' has-roles' : '') + (combined ? ' combined-roles' : '') });
+      // The chip column fits the longest label (chips have padding: a few pixels more than the heatmap's).
+      if (roles) bars.style.setProperty('--chip-w', (roleChipWidth(roles) + 12) + 'px');
       const coreBar = (k) => {
         const v = avg[k];
         const st = v >= 0.9 ? 'bad' : v >= 0.7 ? 'warn' : null;
@@ -2671,6 +2773,193 @@
     ].filter(Boolean);
   }
 
+  // ---------------------------------------------------------------------
+  // Tab: Плагины (optional `plugins`, samples[].pluginTicks)
+  // ---------------------------------------------------------------------
+
+  // Colour follows the kind of main-thread work.
+  const PLUGIN_KIND_INFO = {
+    tasks: { name: 'Задачи планировщика', short: 'задачи', color: 'var(--s1)' },
+    events: { name: 'Слушатели событий', short: 'события', color: 'var(--s4)' },
+    commands: { name: 'Команды', short: 'команды', color: 'var(--s3)' },
+  };
+  const PLUGINS_FIRST = 15;
+  const PLUGINS_COLOR = 'var(--s5)';
+
+  /** Async CPU (ms per wall-clock second) as a share of one core: «27 %», «0,4 %», «<0,1 %». */
+  function fmtCorePct(msPerSecond) {
+    if (msPerSecond === null || msPerSecond === undefined || !isFinite(msPerSecond)) return '—';
+    const f = msPerSecond / 1000;
+    if (f > 0 && f < 0.001) return '<' + NBSP + '0,1' + NBSP + '%';
+    return fmtPct(f, f > 0 && f < 0.1 ? 1 : 0);
+  }
+
+  function pluginKindTipRows(p) {
+    const rows = PLUGIN_KINDS.filter((k) => p[k] > 0).map((k) => ({
+      color: PLUGIN_KIND_INFO[k].color, name: PLUGIN_KIND_INFO[k].name,
+      value: fmtMsTick(p[k]) + NBSP + 'мс' + (p.msPerTick > 0 ? ' · ' + fmtPct(p[k] / p.msPerTick) : ''),
+    }));
+    if (p.callsPerTick !== null && p.callsPerTick !== undefined) rows.push({ name: 'Вызовов за тик', value: fmtPerTick(p.callsPerTick) });
+    return rows;
+  }
+
+  /**
+   * Tasks / events / commands of one plugin as a small stacked bar; with {@code max} (the heaviest plugin's
+   * ms/tick) the bar's length also shows the plugin's time against it.
+   */
+  function pluginKindBar(p, cls, max) {
+    const parts = PLUGIN_KINDS.map((k) => ({ color: PLUGIN_KIND_INFO[k].color, value: p[k] }));
+    const bar = stackBar(parts, cls, p.name + ' · ' + fmtMsTick(p.msPerTick) + NBSP + 'мс/тик', () => pluginKindTipRows(p));
+    if (max > 0) {
+      bar.classList.add('scaled');
+      bar.style.width = clamp(p.msPerTick / max * 100, 0, 100).toFixed(1) + '%';
+    }
+    return bar;
+  }
+
+  function pluginKindLegend() {
+    return legend(PLUGIN_KINDS.map((k) => ({ name: PLUGIN_KIND_INFO[k].name, color: PLUGIN_KIND_INFO[k].color })));
+  }
+
+  function pluginChips(R, P) {
+    const msptAvg = mean(R.msptAvg);
+    const share = msptAvg > 0 ? P.msPerTick / msptAvg : null;
+    const top = P.plugins.length && P.plugins[0].msPerTick > 0 ? P.plugins[0] : null;
+    const active = P.plugins.filter((p) => p.msPerTick > 0 || p.asyncCpuMsPerSecond > 0).length;
+    return el('div', { class: 'stat-chips' }, [
+      chip('В главном потоке', fmtMsTick(P.msPerTick), {
+        unit: 'мс/тик',
+        status: P.msPerTick >= 25 ? 'bad' : P.msPerTick >= 10 ? 'warn' : null,
+        sub: share === null ? 'все плагины' : fmtPct(share) + ' среднего тика',
+      }),
+      chip('Самый тяжёлый', top ? top.name : '—', {
+        sub: top ? fmtMsTick(top.msPerTick) + NBSP + 'мс/тик' + (P.msPerTick > 0 ? ' · ' + fmtPct(top.msPerTick / P.msPerTick) : '') : 'никто не работал в тике',
+      }),
+      chip('Асинхронно', fmtCorePct(P.asyncCpuMsPerSecond), { unit: 'ядра', sub: 'задачи вне тика' }),
+      chip('Плагинов с работой', fmtNum(active), { sub: P.ticks ? 'за ' + fmtNum(P.ticks) + ' ' + plural(P.ticks, ['тик', 'тика', 'тиков']) : null }),
+    ]);
+  }
+
+  /** «Как устроено»: why plugin code is on the main thread, and where their async work runs in this layout. */
+  function pluginExplainCard(R) {
+    const stats = layoutStats(R);
+    const by = {};
+    for (const r of stats || []) by[r.id] = r;
+    let where = 'Асинхронная работа плагинов (runTaskAsynchronously, чат, вход игроков, свои потоки плагинов) идёт в отдельных потоках и тик не задерживает; ' +
+      'её цена — в столбце «Асинхронно» (100' + NBSP + '% — одно ядро целиком).';
+    if (by.plugins) {
+      where += ' В этом замере у плагинов ' + coresLabel(by.plugins.cores) +
+        (by.background ? ', а при нехватке они переливаются на ' + coresLabel(by.background.cores) + ' (ядро-подложка: там у потоков плагинов приоритет над фоном)' : '') + '.';
+    }
+    return card({ title: 'Как плагины работают в Amazake' }, [
+      el('p', { class: 'card-text', text: 'Код плагинов, который трогает мир — синхронные задачи планировщика, слушатели событий, команды, — выполняется в главном потоке, как в обычном Paper. ' +
+        'Так задумано: плагины не могут устроить гонку данных с тиком. Зато каждая миллисекунда этого кода прибавляется к тику — таблица ниже показывает, сколько тика берёт каждый плагин.' }),
+      el('p', { class: 'card-text', text: where }),
+    ]);
+  }
+
+  /** The mean tick split into the plugins' kinds of work and the rest of the tick. */
+  function pluginTickShareCard(R, P) {
+    const msptAvg = mean(R.msptAvg);
+    const kinds = PLUGIN_KINDS.map((k) => ({ id: k, name: PLUGIN_KIND_INFO[k].name, color: PLUGIN_KIND_INFO[k].color, value: sum(P.plugins.map((p) => p[k])) }));
+    // Rows may be cut to the top 50: scale the kinds to the reported total.
+    const kindSum = sum(kinds.map((x) => x.value));
+    if (kindSum > 0 && P.msPerTick > 0) for (const x of kinds) x.value = x.value * P.msPerTick / kindSum;
+    const parts = kinds.slice();
+    if (msptAvg !== null) parts.push({ id: 'rest', name: 'Остальной тик', color: 'var(--ph-inactive)', value: Math.max(0, msptAvg - P.msPerTick) });
+    const total = msptAvg !== null ? Math.max(msptAvg, P.msPerTick) : P.msPerTick;
+    const rows = () => parts.filter((p) => p.value > 0).map((p) => ({ color: p.color, name: p.name, value: fmtMsTick(p.value) + NBSP + 'мс · ' + fmtPct(total > 0 ? p.value / total : 0) }));
+    const items = el('ul', { class: 'loop-legend kind-legend' });
+    for (const p of parts) {
+      const sw = el('span', { class: 'swatch' });
+      sw.style.background = p.color;
+      items.appendChild(el('li', null, [
+        sw,
+        el('span', { class: 'll-name', text: p.name, title: p.name }),
+        el('span', { class: 'll-val mono', text: fmtMsTick(p.value) + NBSP + 'мс' }),
+        el('span', { class: 'll-pct mono', text: total > 0 ? fmtPct(p.value / total) : '—' }),
+      ]));
+    }
+    return card({
+      title: 'Доля плагинов в тике',
+      desc: msptAvg !== null
+        ? 'Средний тик ' + fmtMsTick(msptAvg) + NBSP + 'мс, из них плагины — ' + fmtMsTick(P.msPerTick) + NBSP + 'мс. В их время входит и работа сервера, которую вызвал плагин (например, поставленный им блок).'
+        : 'Время плагинов в главном потоке по видам работы.',
+    }, [stackBar(parts, 'loop-bar', 'Средний тик · ' + fmtMsTick(total) + NBSP + 'мс', rows), items]);
+  }
+
+  function pluginTimeCard(R) {
+    const pt = R.pluginTicks;
+    const desc = 'Время всех плагинов в главном потоке в каждом интервале, мс на тик. Линия — средняя длительность всего тика (MSPT) для сравнения.';
+    if (!pt.some((v) => v !== null)) {
+      return card({ title: 'Плагины по времени', desc: desc }, el('p', { class: 'empty', text: 'В замерах нет времени плагинов по интервалам (samples[].pluginTicks).' }));
+    }
+    const gaps = pt.filter((v) => v === null).length;
+    const series = [{ name: 'Плагины в главном потоке', values: pt, color: PLUGINS_COLOR }];
+    const mspt = { name: 'Средний тик (MSPT)', values: R.msptAvg, color: 'var(--ref)', width: 1.5 };
+    return card({ title: 'Плагины по времени', desc: desc }, [
+      legend([{ name: series[0].name, color: series[0].color }, { name: mspt.name, color: mspt.color, line: true }]),
+      tsChart(R, () => ({
+        stacked: true,
+        height: 220,
+        series: series,
+        lines: [mspt],
+        refs: [{ y: 50, label: '50 мс', strong: true }],
+        yFmt: (v) => fmtNum(v, v % 1 ? 1 : 0),
+        valFmt: (v) => fmtMsTick(v) + NBSP + 'мс',
+        tipRows: (i) => [
+          { color: PLUGINS_COLOR, name: 'Плагины', value: pt[i] === null ? 'нет данных' : fmtMsTick(pt[i]) + NBSP + 'мс' },
+          { color: mspt.color, line: true, name: mspt.name, value: R.msptAvg[i] === null ? 'нет данных' : fmtMsTick(R.msptAvg[i]) + NBSP + 'мс' },
+        ],
+        ariaLabel: 'Время плагинов в главном потоке',
+      })),
+      gaps ? el('p', { class: 'chart-note', text: 'Пропуски — интервалы, в которые главный поток не ответил вовремя: их время вошло в следующий замер.' }) : null,
+    ]);
+  }
+
+  function pluginTableCard(R, P) {
+    const desc = 'Плагины по времени в главном потоке, самые тяжёлые сверху. «Задачи · события · команды» — из чего состоит это время (наведите на полосу). ' +
+      '«Асинхронно» — процессор асинхронных задач планировщика плагина вне тика, в процентах одного ядра.';
+    if (!P.plugins.length) {
+      return card({ title: 'Плагины', desc: desc }, el('p', { class: 'empty', text: 'За время замера ни один плагин не выполнял измеряемой работы.' }));
+    }
+    const msptAvg = mean(R.msptAvg);
+    const maxMs = P.plugins[0].msPerTick;
+    const columns = [
+      { label: 'Плагин', cls: 'name', render: (p) => [
+        el('span', { class: 'plugin-name', text: p.name, title: p.name }),
+        // Phones: the kinds bar goes under the name instead of its own column.
+        p.msPerTick > 0 ? el('span', { class: 'type-bar' }, pluginKindBar(p, 'mini', maxMs)) : null,
+      ] },
+      { label: 'мс/тик', cls: 'num', render: (p) => fmtMsTick(p.msPerTick) },
+      { label: 'Доля тика', cls: 'num opt', render: (p) => (msptAvg > 0 ? fmtPct(p.msPerTick / msptAvg, p.msPerTick / msptAvg < 0.1 ? 1 : 0) : '—') },
+      { label: 'Задачи · события · команды', cls: 'phase-cell opt', render: (p) => (p.msPerTick > 0 ? pluginKindBar(p, 'mini', maxMs) : el('span', { class: 'muted', text: 'только асинхронно' })) },
+      { label: 'Вызовов за тик', cls: 'num opt', render: (p) => fmtPerTick(p.callsPerTick) },
+      { label: 'Асинхронно', short: 'Асинхр.', cls: 'num', render: (p) => fmtCorePct(p.asyncCpuMsPerSecond) },
+    ];
+    const t = table(columns, P.plugins.slice(0, PLUGINS_FIRST));
+    t.wrap.classList.add('types-table', 'plugins-table');
+    const body = [pluginKindLegend(), t.wrap];
+    if (P.plugins.length > PLUGINS_FIRST) {
+      const foot = el('div', { class: 'card-foot' });
+      foot.appendChild(moreButton('Показать все ' + P.plugins.length, () => { fillBody(t.tbody, columns, P.plugins); foot.remove(); }));
+      body.push(foot);
+    }
+    return card({ title: 'Плагины', desc: desc }, body);
+  }
+
+  function tabPlugins(R) {
+    const P = R.pluginBreakdown;
+    if (!P) return noticeEl('info', 'В отчёте нет данных о плагинах', 'Их собирает только сервер Amazake (amazake.yml, profiler.plugin-breakdown).');
+    return [
+      pluginChips(R, P),
+      pluginExplainCard(R),
+      pluginTickShareCard(R, P),
+      pluginTableCard(R, P),
+      pluginTimeCard(R),
+    ];
+  }
+
   /** Overview card «Этапы стресс-теста» (AmazakeStress `stress.stageResults[]`); null without stages. */
   function stressStagesCard(R) {
     const S = R.stress;
@@ -2840,6 +3129,8 @@
     { id: 'ticks', label: 'Тики', render: tabTicks },
     // Only for reports with the optional `entities` object (Amazake's entity tick breakdown).
     { id: 'entities', label: 'Сущности', render: tabEntities, when: (R) => !!R.entityBreakdown },
+    // Only for reports with the optional `plugins` object (Amazake's per-plugin main-thread time).
+    { id: 'plugins', label: 'Плагины', render: tabPlugins, when: (R) => !!R.pluginBreakdown },
     { id: 'memory', label: 'Память', render: tabMemory },
     { id: 'server', label: 'Сервер', render: tabServer },
   ];
@@ -2982,6 +3273,8 @@
   function setTab(id, updateUrl) {
     if (!current) return;
     const tabs = visibleTabs();
+    // An old anchor whose tab this report lacks (#plugins without a plugins block) falls back to its old place.
+    if (!tabs.some((t) => t.id === id) && Object.prototype.hasOwnProperty.call(OLD_ANCHORS, id)) id = OLD_ANCHORS[id];
     if (!tabs.some((t) => t.id === id)) id = 'overview';
     const same = current.tab === id && current.panel.childNodes.length;
     current.tab = id;

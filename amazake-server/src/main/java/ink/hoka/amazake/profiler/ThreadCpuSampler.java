@@ -94,9 +94,14 @@ final class ThreadCpuSampler {
     }
 
     private void record(final String key, final String name, final long cpuNs, final int index, final long elapsedNs) {
+        this.record(key, name, -1L, cpuNs, index, elapsedNs);
+    }
+
+    /** @param javaId the Java thread id, or -1 for a JVM-internal thread read from /proc */
+    private void record(final String key, final String name, final long javaId, final long cpuNs, final int index, final long elapsedNs) {
         ThreadStat stat = this.stats.get(key);
         if (stat == null) {
-            stat = new ThreadStat(name, ThreadGroups.classify(name));
+            stat = new ThreadStat(name, ThreadGroups.classify(name, javaId));
             // Seen at the start: only later CPU counts. Born during the measurement: all of it counts.
             stat.firstNs = index < 0 ? cpuNs : 0L;
             stat.lastNs = stat.firstNs;
@@ -131,7 +136,7 @@ final class ThreadCpuSampler {
             if (this.proc && ThreadGroups.isJvmInternal(ThreadGroups.classify(name))) {
                 continue; // already taken from /proc
             }
-            this.record("jmx:" + ids[i], name, times[i], index, elapsedNs);
+            this.record("jmx:" + ids[i], name, ids[i], times[i], index, elapsedNs);
         }
     }
 

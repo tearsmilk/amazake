@@ -1,0 +1,28 @@
+--- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
++++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
+@@ -44,12 +_,14 @@
+ 
+         HandlerList handlers = event.getHandlers();
+         RegisteredListener[] listeners = handlers.getRegisteredListeners();
++        final boolean amazake$timed = !event.isAsynchronous() && ink.hoka.amazake.plugin.PluginTickStats.enabled(); // Amazake - plugin tick breakdown
+ 
+         for (RegisteredListener registration : listeners) {
+             if (!registration.getPlugin().isEnabled()) {
+                 continue;
+             }
+ 
++            final int amazake$token = amazake$timed ? ink.hoka.amazake.plugin.PluginTickStats.enter(registration.getPlugin(), ink.hoka.amazake.plugin.PluginTickStats.EVENTS) : -1; // Amazake - plugin tick breakdown
+             try {
+                 registration.callEvent(event);
+             } catch (AuthorNagException ex) {
+@@ -71,7 +_,9 @@
+                 if (!(event instanceof ServerExceptionEvent)) { // We don't want to cause an endless event loop
+                     this.callEvent(new ServerExceptionEvent(new ServerEventException(msg, ex, registration.getPlugin(), registration.getListener(), event)));
+                 }
+-            }
++            } finally { // Amazake - plugin tick breakdown
++                ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
++            } // Amazake - plugin tick breakdown
+         }
+     }
+ 

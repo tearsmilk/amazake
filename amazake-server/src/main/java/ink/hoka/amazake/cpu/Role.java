@@ -12,8 +12,14 @@ public enum Role {
     NETWORK("network", "сеть (Netty)"),
     /** Garbage collector, JIT compilers and the JVM's own threads. */
     GC("gc", "GC, JIT и потоки JVM"),
-    /** Every other thread: plugins, chat, Paper's async pools, spark... */
-    BACKGROUND("background", "всё остальное: плагины, чат, фоновые задачи");
+    /**
+     * Plugins' work off the main thread: the scheduler's async pool, async chat and tab completion, the
+     * pools that run plugins' async login listeners, and threads plugins create themselves. Their world
+     * code (sync tasks, sync events, commands) stays on the main thread as in Bukkit.
+     */
+    PLUGINS("plugins", "плагины: асинхронные задачи, чат, свои потоки плагинов"),
+    /** Support: Paper's own background threads, spark, Amazake; plugin threads spill here with priority. */
+    BACKGROUND("background", "поддержка: фон Paper, spark, Amazake; сюда же с приоритетом переливаются потоки плагинов");
 
     private final String id;
     private final String descriptionRu;
@@ -23,7 +29,7 @@ public enum Role {
         this.descriptionRu = descriptionRu;
     }
 
-    /** "tick", "chunks", "network", "gc", "background". */
+    /** "tick", "chunks", "network", "gc", "plugins", "background". */
     public String id() {
         return this.id;
     }

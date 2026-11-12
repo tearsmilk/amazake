@@ -35,7 +35,7 @@ public final class Cores {
     private static Settings last;
 
     private record Settings(boolean enabled, Map<Role, String> overrides, boolean resizeChunkPool, boolean ignoreProcessorCount,
-                            Reserve reserve) {
+                            Reserve reserve, int supportNice) {
     }
 
     /**
@@ -80,9 +80,24 @@ public final class Cores {
      */
     public static synchronized void configure(final boolean enabled, final Map<Role, String> overrides, final boolean resizeChunkPool,
                                               final boolean ignoreProcessorCount, final Reserve reserve) {
+        configure(enabled, overrides, resizeChunkPool, ignoreProcessorCount, reserve, AffinityManager.DEFAULT_SUPPORT_NICE);
+    }
+
+    /**
+     * {@link #configure(boolean, Map, boolean, boolean, Reserve)} with amazake.yml's cpu.layout.support-nice
+     * (0..19, 0: support threads keep their priority).
+     */
+    public static synchronized void configure(final boolean enabled, final Map<Role, String> overrides, final boolean resizeChunkPool,
+                                              final boolean ignoreProcessorCount, final Reserve reserve, final int supportNice) {
         last = new Settings(enabled, overrides == null ? Map.of() : Map.copyOf(overrides), resizeChunkPool, ignoreProcessorCount,
-            reserve == null ? Reserve.DEFAULT : reserve);
+            reserve == null ? Reserve.DEFAULT : reserve, Math.max(0, Math.min(19, supportNice)));
         apply(last, true);
+    }
+
+    /** Java thread ids of the threads plugins created themselves, as the last scan found them (profiler groups). */
+    public static java.util.Set<Long> pluginThreadIds() {
+        final AffinityManager current = manager;
+        return current == null ? java.util.Set.of() : current.pluginThreadIds();
     }
 
     /** Moves of the tick to a reserve CPU since the start (at most 200, oldest first). */
@@ -129,6 +144,7 @@ public final class Cores {
         }
         manager.setFullSet(topology.allowed());
         manager.setReserve(settings.reserve().managerSettings());
+        manager.setSupportNice(settings.supportNice());
         if (!shutdownHook) {
             shutdownHook = true;
             final AffinityManager toStop = manager;
@@ -360,6 +376,7 @@ public final class Cores {
             }
         }
         if (mgr != null && layout != null) {
+            out.addAll(describePlugins(layout, mgr));
             out.addAll(describeReserve(layout, mgr, load));
         }
         if (current.chunkPoolRu() != null) {
@@ -368,6 +385,65 @@ public final class Cores {
         for (final String warning : current.warningsRu()) {
             out.add("Внимание: " + warning);
         }
+        return out;
+    }
+
+    /** Plugins lines of /amazake cores: their own core, the support core they spill onto, threads found. */
+    static List<String> describePlugins(final CoreLayout layout, final AffinityManager mgr) {
+        final List<String> out = new ArrayList<>();
+        final List<Integer> exclusive = new ArrayList<>(layout.cpus(Role.PLUGINS));
+        final List<Integer> shared = new ArrayList<>();
+        for (final int cpu : exclusive) {
+            if (layout.rolesOf(cpu).size() > 1) {
+                shared.add(cpu);
+            }
+        }
+        exclusive.removeAll(shared);
+        final List<Integer> spill = layout.spillCpus();
+        final int nice = mgr.supportNice();
+        final StringBuilder line = new StringBuilder("Плагины: ");
+        if (!exclusive.isEmpty()) {
+            line.append(exclusive.size() == 1 ? "ядро [" : "ядра [").append(CpuListParser.format(exclusive)).append("] целиком");
+        }
+        if (!shared.isEmpty()) {
+            line.append(exclusive.isEmpty() ? "" : " + ").append("ядра [").append(CpuListParser.format(shared))
+                .append("] вместе с другими ролями");
+        }
+        if (!spill.isEmpty()) {
+            line.append(" + ядро-подложка [").append(CpuListParser.format(spill)).append("] (там у потоков плагинов приоритет, ");
+            if (nice <= 0) {
+                line.append("но cpu.layout.support-nice: 0 - фон не понижен)");
+            } else if (mgr.niceProblemRu() != null) {
+                line.append("но фон понизить не удалось: ").append(mgr.niceProblemRu()).append(')');
+            } else {
+                line.append("фон понижен: nice ").append(nice).append(", потоков: ").append(mgr.nicedThreads()).append(')');
+            }
+        }
+        line.append('.');
+        out.add(line.toString());
+        final Map<String, Integer> own = new java.util.TreeMap<>();
+        for (final AffinityManager.PinnedThread thread : mgr.snapshot()) {
+            if (ThreadClassifier.PLUGINS_OWN.equals(thread.group())) {
+                own.merge(thread.comm(), 1, Integer::sum);
+            }
+        }
+        final StringBuilder found = new StringBuilder("  Своих потоков плагинов найдено (группа plugins-own): ")
+            .append(own.values().stream().mapToInt(Integer::intValue).sum());
+        if (!own.isEmpty()) {
+            found.append(" (");
+            int shown = 0;
+            for (final Map.Entry<String, Integer> entry : own.entrySet()) {
+                if (shown++ == 8) {
+                    found.append(", ...");
+                    break;
+                }
+                found.append(shown > 1 ? ", " : "").append('"').append(entry.getKey()).append('"')
+                    .append(entry.getValue() > 1 ? " x" + entry.getValue() : "");
+            }
+            found.append(')');
+        }
+        out.add(found.append('.').toString());
+        out.add("  Код плагинов, который трогает мир (синхронные задачи, события, команды), как и в Bukkit, идёт в главном потоке.");
         return out;
     }
 

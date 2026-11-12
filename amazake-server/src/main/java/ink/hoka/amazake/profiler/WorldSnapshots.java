@@ -22,8 +22,10 @@ final class WorldSnapshots {
 
     /**
      * @param entityTicks EntityTickStats.snapshot() taken in the same main-thread task, or null when not asked for
+     * @param pluginTicks PluginTickStats.snapshot() taken in the same main-thread task, or null when not asked for
      */
-    record Snapshot(List<WorldStats> worlds, int players, java.util.Map<String, Object> entityTicks) {
+    record Snapshot(List<WorldStats> worlds, int players, java.util.Map<String, Object> entityTicks,
+                    java.util.Map<String, Object> pluginTicks) {
         int entities() {
             int sum = 0;
             for (final WorldStats world : this.worlds) {
@@ -46,11 +48,14 @@ final class WorldSnapshots {
 
     /** Counts from the main thread, or null when it did not answer within {@code timeoutMs}. */
     Snapshot take(final boolean withTileEntities, final long timeoutMs) {
-        return this.take(withTileEntities, false, timeoutMs);
+        return this.take(withTileEntities, false, false, timeoutMs);
     }
 
-    /** As {@link #take(boolean, long)}; with {@code withEntityTicks} the snapshot also holds the entity tick counters. */
-    Snapshot take(final boolean withTileEntities, final boolean withEntityTicks, final long timeoutMs) {
+    /**
+     * As {@link #take(boolean, long)}; with {@code withEntityTicks} the snapshot also holds the entity tick
+     * counters, with {@code withPluginTicks} the plugin counters.
+     */
+    Snapshot take(final boolean withTileEntities, final boolean withEntityTicks, final boolean withPluginTicks, final long timeoutMs) {
         if (this.pending != null && !this.pending.isDone()) {
             return null; // the main thread has not even run the previous request
         }
@@ -66,7 +71,7 @@ final class WorldSnapshots {
                     return;
                 }
                 try {
-                    future.complete(read(withTileEntities, withEntityTicks));
+                    future.complete(read(withTileEntities, withEntityTicks, withPluginTicks));
                 } catch (final Throwable t) {
                     future.completeExceptionally(t);
                 }
@@ -80,7 +85,7 @@ final class WorldSnapshots {
         }
     }
 
-    private static Snapshot read(final boolean withTileEntities, final boolean withEntityTicks) {
+    private static Snapshot read(final boolean withTileEntities, final boolean withEntityTicks, final boolean withPluginTicks) {
         final List<WorldStats> worlds = new ArrayList<>();
         int players = 0;
         for (final World world : Bukkit.getWorlds()) {
@@ -96,7 +101,8 @@ final class WorldSnapshots {
             ));
         }
         return new Snapshot(List.copyOf(worlds), players,
-            withEntityTicks ? ink.hoka.amazake.tick.EntityTickStats.snapshot() : null);
+            withEntityTicks ? ink.hoka.amazake.tick.EntityTickStats.snapshot() : null,
+            withPluginTicks ? ink.hoka.amazake.plugin.PluginTickStats.snapshot() : null);
     }
 
     /** Names only, for when the main thread never answered at the end. */

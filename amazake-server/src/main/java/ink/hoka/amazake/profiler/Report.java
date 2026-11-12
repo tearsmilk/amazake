@@ -20,7 +20,8 @@ record Report(
     List<GroupEntry> groups,
     List<LagSpike> lagSpikes,
     List<Migration> migrations,
-    Map<String, Object> entities
+    Map<String, Object> entities,
+    Map<String, Object> plugins
 ) {
 
     static final String FORMAT = "amazake-profile";
@@ -77,7 +78,8 @@ record Report(
         int players,
         Integer entities,
         Integer loadedChunks,
-        Map<String, Object> entityTicks
+        Map<String, Object> entityTicks,
+        Double pluginTicks
     ) {
     }
 

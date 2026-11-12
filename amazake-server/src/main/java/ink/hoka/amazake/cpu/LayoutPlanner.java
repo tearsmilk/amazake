@@ -15,14 +15,17 @@ import java.util.TreeSet;
  * <ul>
  *   <li>N &lt;= 1: no layout (nothing to split).</li>
  *   <li>N = 2: tick [c0]; everything else [c1].</li>
- *   <li>N = 3: tick [c0]; chunks + gc [c1]; network + background [c2].</li>
- *   <li>N = 4: tick [c0]; chunks [c1]; gc [c2]; network + background [c3].</li>
+ *   <li>N = 3: tick [c0]; chunks + gc [c1]; network + plugins + background [c2].</li>
+ *   <li>N = 4: tick [c0]; chunks [c1]; network + gc + background [c2]; plugins [c3].</li>
  *   <li>N &gt;= 5: tick gets the first CPU of the first physical core. Its SMT sibling is left idle
  *       when N &gt;= 8 and there are at least 4 physical cores, so nothing competes with the main thread
  *       for that core; otherwise the sibling goes to the end of the pool. The other M CPUs are ordered
  *       physical core by physical core (both threads of a core next to each other) and cut into, in
- *       this order: chunks = round(40% of M), gc = round(15% of M), network = 1, background = the rest;
- *       each at least 1 (chunks, then gc, give back a CPU while background would be empty).</li>
+ *       this order: chunks = round(40% of M), gc = round(15% of M), plugins = round(15% of M), network = 1,
+ *       background = the rest; each at least 1 (chunks, then gc, then plugins give back a CPU while
+ *       background would be empty). For M = 4 (N = 5 without SMT): chunks, gc, plugins one CPU each,
+ *       network + background share the last. 6 CPUs without SMT: tick 0, chunks 1, gc 2, plugins 3,
+ *       network + background 4, reserve 5.</li>
  * </ul>
  *
  * <p>Tick takes the lowest allowed CPU. The owner moves it with {@code cpu.layout.tick} when that CPU is
@@ -40,13 +43,15 @@ import java.util.TreeSet;
  * <p>Reserve (amazake.yml {@code cpu.reserve.count}): CPUs kept empty, for the tick to move to when its
  * own CPU gets busy with foreign work (see {@link ContentionDetector}). "auto" is 1 when at least
  * {@value #AUTO_RESERVE_MIN_CPUS} CPUs are allowed, else 0. Reserve CPUs are taken out of background only,
- * never from tick or chunks nor from a role set by hand, and never on the tick's own physical core (SMT
+ * never from tick or chunks, from the plugins' own core (a plugins CPU background does not share) nor from a
+ * role set by hand, and never on the tick's own physical core (SMT
  * sibling): from the end of background's list, CPUs that no other role shares first. When the tick's SMT
  * sibling is kept idle (N &gt;= 8 with SMT), a reserve CPU's sibling is kept idle as well (taken out of
  * background, shown as unused), so the moved tick again has a physical core to itself; a CPU whose sibling
  * cannot be idled is skipped. On 6 CPUs with SMT (3 cores) the only background CPU is the tick's sibling,
  * so "auto" gives no reserve there. Roles that lose their last CPU to the reserve share another role's CPUs
- * (background, then network, gc, chunks), as on small machines.</p>
+ * (background, then network, gc, chunks), as on small machines; background itself takes network's, gc's or
+ * chunks' and the plugins core only last, so plugins keep their own core whenever possible.</p>
  */
 public final class LayoutPlanner {
 
@@ -211,6 +216,12 @@ public final class LayoutPlanner {
         for (final Role role : manualRoles) {
             forbidden.addAll(result.get(role));
         }
+        // The plugins core stays the plugins': only a CPU plugins share with background may become reserve.
+        for (final int cpu : result.get(Role.PLUGINS)) {
+            if (!result.get(Role.BACKGROUND).contains(cpu)) {
+                forbidden.add(cpu);
+            }
+        }
         final Set<Integer> used = new TreeSet<>();
         result.values().forEach(used::addAll);
         // A reserve on the tick's own physical core is useless: a neighbour that takes the tick CPU would
@@ -242,35 +253,47 @@ public final class LayoutPlanner {
         }));
         final List<Integer> reserve = new ArrayList<>();
         final Set<Integer> idle = new TreeSet<>();
-        for (final int cpu : candidates) {
-            if (reserve.size() >= want) {
+        // First pass: only siblings that are background candidates themselves may be idled. Second pass (big
+        // SMT machines where background's last CPU shares its core with network or gc): an automatic
+        // network/gc-only sibling may be idled too; those roles then share another role's CPUs. Never a
+        // sibling of tick, chunks, the plugins core or a manual role.
+        for (final boolean widen : new boolean[] {false, true}) {
+            if (widen && !idleTickSibling) {
                 break;
             }
-            if (idle.contains(cpu)) {
-                continue;
-            }
-            final List<Integer> toIdle = new ArrayList<>();
-            boolean fits = true;
-            if (idleTickSibling) {
-                for (final int sibling : siblings.getOrDefault(cpu, List.of(cpu))) {
-                    if (sibling == cpu || idle.contains(sibling) || !used.contains(sibling)) {
-                        continue; // itself, or idle already
-                    }
-                    if (!candidates.contains(sibling) || reserve.contains(sibling)) {
-                        fits = false; // the sibling works for tick, chunks or a manual role: it cannot be idled
-                        break;
-                    }
-                    toIdle.add(sibling);
+            for (final int cpu : candidates) {
+                if (reserve.size() >= want) {
+                    break;
                 }
-            }
-            if (fits) {
-                reserve.add(cpu);
-                idle.addAll(toIdle);
+                if (idle.contains(cpu) || reserve.contains(cpu)) {
+                    continue;
+                }
+                final List<Integer> toIdle = new ArrayList<>();
+                boolean fits = true;
+                if (idleTickSibling) {
+                    for (final int sibling : siblings.getOrDefault(cpu, List.of(cpu))) {
+                        if (sibling == cpu || idle.contains(sibling) || !used.contains(sibling)) {
+                            continue; // itself, or idle already
+                        }
+                        final boolean idleable = candidates.contains(sibling)
+                            || (widen && !forbidden.contains(sibling) && !tickSiblings.contains(sibling)
+                                && networkOrGcOnly(result, sibling));
+                        if (!idleable || reserve.contains(sibling)) {
+                            fits = false; // the sibling works for tick, chunks, plugins or a manual role: it cannot be idled
+                            break;
+                        }
+                        toIdle.add(sibling);
+                    }
+                }
+                if (fits) {
+                    reserve.add(cpu);
+                    idle.addAll(toIdle);
+                }
             }
         }
         if (reserve.size() < want && requested >= 0) {
             warnings.add("cpu.reserve.count: " + requested + " - столько ядер в резерв не набралось, в резерве "
-                + reserve.size() + ". Резерв берётся только из ядер background, которые не заняты tick, chunks"
+                + reserve.size() + ". Резерв берётся только из ядер background, которые не заняты tick, chunks, своим ядром plugins"
                 + " и ролями, заданными вручную, и не делят физическое ядро (SMT) с tick.");
         }
         if (reserve.isEmpty()) {
@@ -281,11 +304,15 @@ public final class LayoutPlanner {
             entry.getValue().removeAll(idle);
         }
         // Roles left without CPUs share another role's, the way the small automatic layouts combine them.
-        for (final Role role : List.of(Role.NETWORK, Role.GC, Role.BACKGROUND)) {
+        // Background takes the plugins core only as the last resort, so plugins keep their own core.
+        for (final Role role : List.of(Role.NETWORK, Role.GC, Role.PLUGINS, Role.BACKGROUND)) {
             if (!result.get(role).isEmpty()) {
                 continue;
             }
-            for (final Role donor : List.of(Role.BACKGROUND, Role.NETWORK, Role.GC, Role.CHUNKS)) {
+            final List<Role> donors = role == Role.BACKGROUND
+                ? List.of(Role.NETWORK, Role.GC, Role.CHUNKS, Role.PLUGINS)
+                : List.of(Role.BACKGROUND, Role.NETWORK, Role.GC, Role.CHUNKS);
+            for (final Role donor : donors) {
                 if (donor != role && !result.get(donor).isEmpty()) {
                     result.put(role, new ArrayList<>(result.get(donor)));
                     break;
@@ -293,6 +320,20 @@ public final class LayoutPlanner {
             }
         }
         return new CoreLayout(topology.allowed(), result, reserve, siblings);
+    }
+
+    /** Whether {@code cpu} is used by network and/or gc and by no other role. */
+    private static boolean networkOrGcOnly(final Map<Role, List<Integer>> roles, final int cpu) {
+        boolean any = false;
+        for (final Map.Entry<Role, List<Integer>> entry : roles.entrySet()) {
+            if (entry.getValue().contains(cpu)) {
+                if (entry.getKey() != Role.NETWORK && entry.getKey() != Role.GC) {
+                    return false;
+                }
+                any = true;
+            }
+        }
+        return any;
     }
 
     /** "2" or "1.5". */
@@ -340,14 +381,14 @@ public final class LayoutPlanner {
         return out;
     }
 
-    /** Splits ordered CPUs among the four roles other than tick. */
+    /** Splits ordered CPUs among the roles other than tick. */
     static Map<Role, List<Integer>> rest(final List<Integer> pool) {
         final int m = pool.size();
         final Map<Role, List<Integer>> out = new EnumMap<>(Role.class);
         switch (m) {
             case 0 -> throw new IllegalArgumentException("no CPUs left for the other roles");
             case 1 -> {
-                for (final Role role : List.of(Role.CHUNKS, Role.NETWORK, Role.GC, Role.BACKGROUND)) {
+                for (final Role role : List.of(Role.CHUNKS, Role.NETWORK, Role.GC, Role.PLUGINS, Role.BACKGROUND)) {
                     out.put(role, List.of(pool.get(0)));
                 }
             }
@@ -355,28 +396,41 @@ public final class LayoutPlanner {
                 out.put(Role.CHUNKS, List.of(pool.get(0)));
                 out.put(Role.GC, List.of(pool.get(0)));
                 out.put(Role.NETWORK, List.of(pool.get(1)));
+                out.put(Role.PLUGINS, List.of(pool.get(1)));
                 out.put(Role.BACKGROUND, List.of(pool.get(1)));
             }
             case 3 -> {
                 out.put(Role.CHUNKS, List.of(pool.get(0)));
+                out.put(Role.NETWORK, List.of(pool.get(1)));
                 out.put(Role.GC, List.of(pool.get(1)));
-                out.put(Role.NETWORK, List.of(pool.get(2)));
-                out.put(Role.BACKGROUND, List.of(pool.get(2)));
+                out.put(Role.BACKGROUND, List.of(pool.get(1)));
+                out.put(Role.PLUGINS, List.of(pool.get(2)));
+            }
+            case 4 -> {
+                out.put(Role.CHUNKS, List.of(pool.get(0)));
+                out.put(Role.GC, List.of(pool.get(1)));
+                out.put(Role.PLUGINS, List.of(pool.get(2)));
+                out.put(Role.NETWORK, List.of(pool.get(3)));
+                out.put(Role.BACKGROUND, List.of(pool.get(3)));
             }
             default -> {
                 int chunks = Math.max(1, (4 * m + 5) / 10);   // round(0.40 * m)
                 int gc = Math.max(1, (15 * m + 50) / 100);    // round(0.15 * m)
+                int plugins = Math.max(1, (15 * m + 50) / 100); // round(0.15 * m)
                 final int network = 1;
-                while (m - chunks - gc - network < 1) {
+                while (m - chunks - gc - plugins - network < 1) {
                     if (chunks > 1) {
                         chunks--;
-                    } else {
+                    } else if (gc > 1) {
                         gc--;
+                    } else {
+                        plugins--;
                     }
                 }
                 int at = 0;
                 out.put(Role.CHUNKS, List.copyOf(pool.subList(at, at += chunks)));
                 out.put(Role.GC, List.copyOf(pool.subList(at, at += gc)));
+                out.put(Role.PLUGINS, List.copyOf(pool.subList(at, at += plugins)));
                 out.put(Role.NETWORK, List.copyOf(pool.subList(at, at += network)));
                 out.put(Role.BACKGROUND, List.copyOf(pool.subList(at, m)));
             }

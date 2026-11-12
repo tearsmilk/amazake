@@ -797,8 +797,8 @@ button, input, textarea { font: inherit; color: inherit; }
 
 .core-bar .name { color: var(--muted); }
 
-.core-bars.has-roles .core-bar { grid-template-columns: 56px 50px 1fr 44px; gap: 8px; }
-.core-bars.combined-roles .core-bar { grid-template-columns: 56px 78px 1fr 44px; }
+.core-bars.has-roles .core-bar { grid-template-columns: 56px var(--chip-w, 50px) 1fr 44px; gap: 8px; }
+.core-bars.combined-roles .core-bar { grid-template-columns: 56px var(--chip-w, 78px) 1fr 44px; }
 
 /* --- core layout roles (system.coreRoles) ------------------------------ */
 
@@ -1290,6 +1290,20 @@ td.phase-cell { width: 26%; min-width: 120px; }
 
 .stage-title { display: block; color: var(--muted); font-size: 12px; }
 
+/* --- plugins tab (optional plugins object) --------------------------- */
+
+.card-text { color: var(--ink-2); margin: 0 0 8px; font-size: 14px; line-height: 1.55; max-width: 900px; }
+
+.card-text:last-child { margin-bottom: 0; }
+
+.plugins-table .plugin-name { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+
+.plugins-table .stack-bar.mini.scaled { min-width: 4px; }
+
+.plugins-table .type-bar { width: 100%; }
+
+.kind-legend { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
 /* --- responsive ------------------------------------------------------ */
 
 @media (max-width: 1180px) {
@@ -1302,7 +1316,7 @@ td.phase-cell { width: 26%; min-width: 120px; }
 @media (max-width: 1000px) {
   .widgets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ent-classes { grid-template-columns: minmax(0, 1fr); }
-  .loop-legend { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .loop-legend, .kind-legend { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .grid-2 { grid-template-columns: minmax(0, 1fr); }
   .tree-row { grid-template-columns: minmax(0, 1.4fr) minmax(100px, 1fr) 64px 56px 64px 78px; }
   .tc-spark { display: none !important; }
@@ -1363,6 +1377,7 @@ td.phase-cell { width: 26%; min-width: 120px; }
   .opt { display: none; }
   .types-table .type-bar { display: block; margin-top: 6px; }
   .types-table td.name { min-width: 120px; }
+  .plugins-table .plugin-name { max-width: 150px; }
   .td-sub { display: block; }
   th { white-space: normal; }
   td.name { max-width: 200px; min-width: 104px; }
@@ -1411,7 +1426,7 @@ td.phase-cell { width: 26%; min-width: 120px; }
   /* entities: short headers, one-column legends */
   .types-table .th-full, .stages-table .th-full { display: none; }
   .types-table .th-short, .stages-table .th-short { display: inline; }
-  .loop-legend { grid-template-columns: minmax(0, 1fr); }
+  .loop-legend, .kind-legend { grid-template-columns: minmax(0, 1fr); }
   .stages-table .stage-title { display: none; }
   .stages-table td.name { min-width: 0; }
   .stages-table th, .stages-table td { padding-left: 7px; padding-right: 7px; }

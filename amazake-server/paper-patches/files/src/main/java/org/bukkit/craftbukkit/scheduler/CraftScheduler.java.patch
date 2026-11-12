@@ -1,0 +1,18 @@
+--- a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java
++++ b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java
+@@ -470,6 +_,7 @@
+             }
+             if (task.isSync()) {
+                 this.currentTask = task;
++                final int amazake$token = ink.hoka.amazake.plugin.PluginTickStats.enter(task.getOwner(), ink.hoka.amazake.plugin.PluginTickStats.TASKS); // Amazake - plugin tick breakdown
+                 try {
+                     task.run();
+                 } catch (final Throwable throwable) {
+@@ -486,6 +_,7 @@
+                         new com.destroystokyo.paper.event.server.ServerExceptionEvent(new com.destroystokyo.paper.exception.ServerSchedulerException(logMessage, throwable, task)));
+                     // Paper end
+                 } finally {
++                    ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
+                     this.currentTask = null;
+                 }
+                 this.parsePending();

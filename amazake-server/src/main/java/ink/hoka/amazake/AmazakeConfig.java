@@ -49,6 +49,8 @@ public final class AmazakeConfig {
     public static int profilerIntervalMs = 1000;
     /** Time every entity tick by type and phase during a measurement (the report's "entities"). */
     public static boolean profilerEntityBreakdown = true;
+    /** Time each plugin's main-thread work (tasks, sync listeners, commands) and async task CPU during a measurement (the report's "plugins"). */
+    public static boolean profilerPluginBreakdown = true;
 
     /** Core layout: pin thread groups to their own CPUs (Linux, at least 2 CPUs). */
     public static boolean cpuLayoutEnabled = true;
@@ -60,6 +62,8 @@ public final class AmazakeConfig {
     public static boolean cpuLayoutIgnoreProcessorCount = false;
     /** cpu.reserve: empty CPUs the main thread moves to when its own CPU is busy with foreign work. */
     public static Cores.Reserve cpuReserve = Cores.Reserve.DEFAULT;
+    /** cpu.layout.support-nice: nice of support threads on the CPUs plugin threads spill onto; 0: none. */
+    public static int cpuLayoutSupportNice = 5;
 
     private AmazakeConfig() {
     }
@@ -113,11 +117,18 @@ public final class AmazakeConfig {
             "Во время замера считать время тика сущностей: мобы, остальные сущности и игроки,",
             "по типам и по фазам (цели, мозг, поиск пути, движение...). В отчёте это вкладка «Сущности».",
             "Вне замера ничего не стоит; во время замера добавляет немного к тику при большом числе сущностей.");
+        profilerPluginBreakdown = bool("profiler.plugin-breakdown", true,
+            "Во время замера считать, сколько каждый плагин занимает в главном потоке (задачи планировщика,",
+            "обработчики событий, команды) и сколько процессора съедают его асинхронные задачи.",
+            "Код плагинов при этом работает как обычно, только измеряется. В отчёте это вкладка «Плагины».",
+            "Вне замера ничего не стоит; во время замера два замера времени на каждый вызов плагина.");
 
         cpuLayoutEnabled = bool("cpu.layout.enabled", true,
             "Раскладка ядер: каждое ядро процессора получает свою работу.",
-            "Главный поток (tick), чанки (chunks), сеть (network), GC и JIT (gc) и всё остальное (background)",
-            "закрепляются каждый за своими ядрами, чтобы не мешать друг другу.",
+            "Главный поток (tick), чанки (chunks), сеть (network), GC и JIT (gc), плагины (plugins) и поддержка",
+            "(background) закрепляются каждый за своими ядрами, чтобы не мешать друг другу.",
+            "Код плагинов, который трогает мир (синхронные задачи, события, команды), как и в Bukkit, остаётся",
+            "в главном потоке: гонок данных с тиком нет. На ядра plugins уходит только их асинхронная работа.",
             "Работает только на Linux, если серверу доступно хотя бы 2 ядра; нужна команда taskset (util-linux)",
             "и флаг запуска -XX:ActiveProcessorCount=<число ядер>. Тики сами по себе не ускоряются:",
             "раскладка только убирает помехи главному потоку, а остальным задачам достаётся меньше ядер.",
@@ -133,8 +144,14 @@ public final class AmazakeConfig {
             "Ядра для сети (Netty: пакеты, сжатие, шифрование). auto: одно ядро."));
         roles.put(Role.GC, cpuList("cpu.layout.gc",
             "Ядра для сборщика мусора, JIT-компилятора и служебных потоков JVM. auto: около 15% остальных ядер."));
+        roles.put(Role.PLUGINS, cpuList("cpu.layout.plugins",
+            "Ядра для асинхронной работы плагинов: асинхронные задачи планировщика, чат, асинхронные события входа",
+            "и потоки, которые плагины создали сами. auto: своё ядро (около 15% остальных ядер), если ядер 4 и больше;",
+            "на 2-3 ядрах плагины делят ядро с сетью и поддержкой. Кроме своих ядер потоки плагинов могут",
+            "переливаться на ядра background (ядро-подложку), где у них приоритет над фоном (support-nice)."));
         roles.put(Role.BACKGROUND, cpuList("cpu.layout.background",
-            "Ядра для всего остального: плагины, чат, фоновые задачи Paper, spark. auto: оставшиеся ядра."));
+            "Ядра поддержки (ядро-подложка): фоновые задачи Paper, spark, Amazake. Сюда же с приоритетом",
+            "переливаются потоки плагинов, когда им мало своих ядер. auto: оставшиеся ядра."));
         cpuLayoutRoles = Map.copyOf(roles);
         cpuLayoutResizeChunkPool = bool("cpu.layout.resize-chunk-pool", true,
             "Сделать в пуле чанков Paper столько потоков, сколько ядер у chunks.",
@@ -142,6 +159,13 @@ public final class AmazakeConfig {
         cpuLayoutIgnoreProcessorCount = bool("cpu.layout.ignore-processor-count", false,
             "Закреплять потоки, даже если нет флага -XX:ActiveProcessorCount. Без флага Java после закрепления",
             "считает ядра по потоку (у главного - 1), и пулы потоков плагинов получаются слишком маленькими.");
+        cpuLayoutSupportNice = Math.min(19, Math.max(0, integer("cpu.layout.support-nice", 5,
+            "Приоритет фоновых потоков (spark, Amazake, служебные потоки Paper) на ядре-подложке, где с ними",
+            "работают потоки плагинов: nice от 0 до 19. 5 - потоки плагинов получают процессор примерно 3:1.",
+            "0 - не менять приоритеты. Главный поток, сеть, чанки, GC и потоки плагинов не трогаются никогда,",
+            "как и общий пул ForkJoinPool (через него плагины часто работают асинхронно: CompletableFuture).",
+            "Без права CAP_SYS_NICE nice можно только поднять: после выключения раскладки он остаётся",
+            "до перезапуска сервера.")));
 
         final boolean reserveEnabled = bool("cpu.reserve.enabled", true,
             "Резерв и переезд главного потока. Резервные ядра остаются пустыми: Amazake не ставит туда ни одного",
@@ -154,9 +178,9 @@ public final class AmazakeConfig {
         final int reserveCount = reserveCount("cpu.reserve.count",
             "Сколько ядер держать в резерве. auto: 1, если серверу доступно 6 ядер и больше, иначе 0.",
             "На 3 ядрах auto даёт 0: лишнего ядра нет, резерв отнял бы единственное ядро у фона и сети.",
-            "Можно задать 1 вручную: тогда чанки, GC, сеть и фон делят одно ядро. Ядра резерва берутся только",
-            "у background (никогда у tick и chunks и не со второго потока SMT ядра tick; поэтому на 6 ядрах с SMT",
-            "auto даёт 0).");
+            "Можно задать 1 вручную: тогда чанки, GC, сеть, плагины и фон делят одно ядро. Ядра резерва берутся",
+            "только у background (никогда у tick, chunks, своего ядра plugins и не со второго потока SMT ядра tick;",
+            "поэтому на 6 ядрах с SMT auto даёт 0).");
         final int reserveCheck = Math.min(60, Math.max(1, integer("cpu.reserve.check-seconds", 2,
             "Как часто проверять ядро tick, в секундах (от 1 до 60).")));
         final double reserveThreshold = Math.min(1.0, Math.max(0.05, decimal("cpu.reserve.foreign-load-threshold", 0.25,
@@ -171,7 +195,8 @@ public final class AmazakeConfig {
             LOGGER.log(Level.WARNING, "Could not write " + file, e);
         }
         LOGGER.info("Loaded " + file.getName());
-        Cores.configure(cpuLayoutEnabled, cpuLayoutRoles, cpuLayoutResizeChunkPool, cpuLayoutIgnoreProcessorCount, cpuReserve);
+        Cores.configure(cpuLayoutEnabled, cpuLayoutRoles, cpuLayoutResizeChunkPool, cpuLayoutIgnoreProcessorCount, cpuReserve,
+            cpuLayoutSupportNice);
         return true;
     }
 
