@@ -166,6 +166,32 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(json.loads(body.decode("utf-8")), report)
         self.assert_common_headers(headers)
 
+    def test_core_roles_are_accepted_and_kept(self):
+        # system.coreRoles is optional (docs/profiler-format.md): one role per samples[].cores entry
+        system = {"logicalCores": 4, "perCore": True, "perThreadSource": "proc",
+                  "coreRoles": ["tick", "chunks", "gc", "network"]}
+        samples = [dict(sample_report()["samples"][0], cores=[0.9, 0.4, 0.1, 0.2])]
+        report = sample_report(system=system, samples=samples)
+        status, _, body = upload(self.h, report)
+        self.assertEqual(status, 201, body)
+        status, _, body = self.h.request("GET", "/api/reports/" + json.loads(body)["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body.decode("utf-8"))["system"]["coreRoles"],
+                         ["tick", "chunks", "gc", "network"])
+
+        # small machines combine roles on one core: "chunks+gc", "network+background"
+        system = dict(system, logicalCores=3, coreRoles=["tick", "chunks+gc", "network+background"])
+        samples = [dict(sample_report()["samples"][0], cores=[0.9, 0.4, 0.1])]
+        status, _, body = upload(self.h, sample_report(system=system, samples=samples))
+        self.assertEqual(status, 201, body)
+        status, _, body = self.h.request("GET", "/api/reports/" + json.loads(body)["id"])
+        self.assertEqual(json.loads(body.decode("utf-8"))["system"]["coreRoles"],
+                         ["tick", "chunks+gc", "network+background"])
+
+        # a report without a layout (or from older servers) is still fine
+        status, _, body = upload(self.h, sample_report())
+        self.assertEqual(status, 201, body)
+
     def test_upload_gzip_and_get_gzip(self):
         report = sample_report(durationMs=1500.5)
         status, _, body = upload(self.h, report, gz=True)

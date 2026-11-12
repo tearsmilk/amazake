@@ -1,6 +1,8 @@
 package ink.hoka.amazake.profiler;
 
 import ink.hoka.amazake.Amazake;
+import ink.hoka.amazake.cpu.CoreLayout;
+import ink.hoka.amazake.cpu.CpuTopology;
 import io.papermc.paper.ServerBuildInfo;
 import io.papermc.paper.configuration.GlobalConfiguration;
 import java.io.IOException;
@@ -51,7 +53,11 @@ final class EnvironmentInfo {
         );
     }
 
-    static Report.SystemInfo system(final boolean perCore, final String perThreadSource) {
+    /**
+     * @param coreIds the CPU id of each entry of samples[].cores (see {@link CpuSampler#coreIds()}),
+     *                cut to the length the samples have; null when there is no per-core data
+     */
+    static Report.SystemInfo system(final boolean perCore, final String perThreadSource, final int[] coreIds) {
         Long totalMemory = null;
         if (ManagementFactory.getOperatingSystemMXBean() instanceof com.sun.management.OperatingSystemMXBean os) {
             final long total = os.getTotalMemorySize();
@@ -60,13 +66,35 @@ final class EnvironmentInfo {
         return new Report.SystemInfo(
             System.getProperty("os.name", "") + " " + System.getProperty("os.version", ""),
             System.getProperty("os.arch", ""),
-            Runtime.getRuntime().availableProcessors(),
+            CpuTopology.availableProcessors(),
             cpuModel(),
             totalMemory,
             Runtime.getRuntime().maxMemory(),
             perCore,
-            perThreadSource
+            perThreadSource,
+            perCore ? coreRoles(coreIds) : null
         );
+    }
+
+    /** The core layout's role of each reported core, or null when no layout is active. */
+    private static List<String> coreRoles(final int[] coreIds) {
+        if (coreIds == null || coreIds.length == 0) {
+            return null;
+        }
+        try {
+            final CoreLayout layout = CoreLayout.current();
+            if (layout == null) {
+                return null;
+            }
+            final List<String> roles = new ArrayList<>(coreIds.length);
+            for (final int id : coreIds) {
+                roles.add(layout.roleIds(id)); // "chunks+gc" when a core has several roles
+            }
+            return List.copyOf(roles);
+        } catch (final RuntimeException e) {
+            Profiler.LOGGER.warning("Profiler could not read the core layout: " + e);
+            return null;
+        }
     }
 
     private static List<String> jvmArgs() {
@@ -108,7 +136,7 @@ final class EnvironmentInfo {
                 io = Math.max(1, config.chunkSystem.ioThreads);
             }
         }
-        final int netty = Integer.getInteger("io.netty.eventLoopThreads", Runtime.getRuntime().availableProcessors() * 2);
+        final int netty = Integer.getInteger("io.netty.eventLoopThreads", CpuTopology.availableProcessors() * 2);
         return new Report.ThreadPools(workers, io, netty);
     }
 

@@ -41,6 +41,43 @@
   };
   const REST_COLOR = 'var(--s-rest)';
 
+  // Core layout roles (system.coreRoles): the colour of the thread group each role runs.
+  const CORE_ROLES = {
+    tick: { short: 'тик', name: 'Тик (главный поток)', color: 'var(--s1)', groups: ['main'] },
+    chunks: { short: 'чанки', name: 'Чанки', color: 'var(--s2)', groups: ['chunk-workers', 'chunk-io'] },
+    network: { short: 'сеть', name: 'Сеть (Netty)', color: 'var(--s3)', groups: ['netty'] },
+    gc: { short: 'GC', name: 'GC и JIT', color: 'var(--s4)', groups: ['gc', 'jit'] },
+    background: { short: 'фон', name: 'Фоновые потоки', color: 'var(--s5)', groups: null }, // every other group
+    shared: { short: 'общее', name: 'Без роли', color: REST_COLOR, groups: [] },
+  };
+  const ROLE_ORDER = ['tick', 'chunks', 'network', 'gc', 'background', 'shared'];
+
+  /** The roles of a coreRoles entry: "chunks+gc" -> ['chunks', 'gc']; [] for "shared". */
+  function roleParts(v) {
+    if (typeof v !== 'string' || v === 'shared') return [];
+    return v.split('+').filter((p) => p !== 'shared' && Object.prototype.hasOwnProperty.call(CORE_ROLES, p));
+  }
+
+  /** Canonical coreRoles entry: known roles in ROLE_ORDER joined with "+", or "shared". */
+  function normRole(v) {
+    const parts = roleParts(v);
+    const out = ROLE_ORDER.filter((id) => parts.indexOf(id) >= 0);
+    return out.length ? out.join('+') : 'shared';
+  }
+
+  /** Label and colour of a coreRoles entry; a core with several roles gets «чанки+GC» and its first role's colour. */
+  function roleInfo(v) {
+    if (Object.prototype.hasOwnProperty.call(CORE_ROLES, v)) return CORE_ROLES[v];
+    const parts = roleParts(v);
+    if (!parts.length) return CORE_ROLES.shared;
+    return {
+      short: parts.map((p) => CORE_ROLES[p].short).join('+'),
+      name: parts.map((p) => CORE_ROLES[p].name).join(' + ') + ' (общее ядро)',
+      color: CORE_ROLES[parts[0]].color,
+      groups: null,
+    };
+  }
+
   const ENV_NAMES = { NORMAL: 'Обычный', NETHER: 'Незер', THE_END: 'Энд', CUSTOM: 'Свой' };
 
   const SEVERITY = {
@@ -308,6 +345,14 @@
     }
 
     const perCore = system.perCore === true && coresFromSamples > 0;
+    // One entry per reported core: a role, several joined with "+" ("chunks+gc"), or "shared";
+    // unknown names are dropped, a list without any role is ignored.
+    let coreRoles = null;
+    if (perCore && Array.isArray(system.coreRoles) && system.coreRoles.length) {
+      coreRoles = [];
+      for (let k = 0; k < coresFromSamples; k++) coreRoles.push(normRole(system.coreRoles[k]));
+      if (!coreRoles.some((r) => r !== 'shared')) coreRoles = null;
+    }
     const pools = isObj(server.threadPools) ? server.threadPools : {};
 
     return {
@@ -349,6 +394,7 @@
         heapMaxBytes: numOrNull(system.heapMaxBytes),
         perCore: perCore,
         perThreadSource: str(system.perThreadSource, ''),
+        coreRoles: coreRoles,
       },
       cores: samples.map((s) => (Array.isArray(s.cores) ? s.cores.map((v) => clamp(num(v, 0), 0, 1)) : null)),
       coreCount: coresFromSamples,
@@ -741,8 +787,13 @@
   function heatmap(R) {
     return chartBox((box, W) => {
       const n = R.n, rows = R.coreCount;
+      const roles = R.system.coreRoles;
       const cellH = clamp(Math.floor(288 / rows), 3, 14);
-      const ml = 58, mr = 8, mt = 4, mb = 26;
+      // With a core layout every row gets a role chip (and a colour strip, also on rows without a label).
+      const compact = W < 560;
+      const numW = compact ? 22 : 52;
+      const chipW = roles && roles.some((v) => v.indexOf('+') >= 0) ? 66 : 40;
+      const ml = roles ? numW + chipW + 18 : 58, mr = 8, mt = 4, mb = 26;
       const pw = Math.max(40, W - ml - mr);
       const H = mt + rows * cellH + mb;
       // Long reports have far more samples than pixels: bin samples into at most
@@ -788,8 +839,31 @@
         if (paths[k]) g.appendChild(svg('path', { d: paths[k], class: k === 10 ? 'hm0' : 'hm' + k }));
       }
       const every = Math.max(1, Math.ceil(13 / cellH));
+      if (roles) {
+        const strips = {};
+        for (let r = 0; r < rows; r++) {
+          const role = roles[r] || 'shared';
+          strips[role] = (strips[role] || '') + 'M' + (ml - 6) + ' ' + (mt + r * cellH) + 'h3v' + hCell + 'h-3z';
+        }
+        for (const role of Object.keys(strips)) {
+          const p = svg('path', { d: strips[role], class: 'role-strip' });
+          p.style.fill = roleInfo(role).color;
+          root.appendChild(p);
+        }
+      }
       for (let r = 0; r < rows; r += every) {
-        root.appendChild(svg('text', { x: ml - 8, y: mt + r * cellH + cellH / 2 + 4, 'text-anchor': 'end', text: 'ядро ' + r }));
+        const cy = mt + r * cellH + cellH / 2;
+        if (!roles) {
+          root.appendChild(svg('text', { x: ml - 8, y: cy + 4, 'text-anchor': 'end', text: 'ядро ' + r }));
+          continue;
+        }
+        const role = roles[r] || 'shared';
+        root.appendChild(svg('text', { x: numW, y: cy + 4, 'text-anchor': 'end', text: compact ? String(r) : 'ядро ' + r }));
+        const chipH = Math.min(13, Math.max(9, cellH * every - 2));
+        const bg = svg('rect', { x: numW + 6, y: cy - chipH / 2, width: chipW, height: chipH, rx: chipH / 2, class: 'role-chip-bg' + (role === 'shared' ? ' shared' : '') });
+        bg.style.fill = roleInfo(role).color;
+        root.appendChild(bg);
+        root.appendChild(svg('text', { x: numW + 6 + chipW / 2, y: cy + 3.5, 'text-anchor': 'middle', class: 'role-chip-text', text: roleInfo(role).short }));
       }
       const d0 = R.t[0] - R.interval, d1 = R.t[n - 1];
       for (const tt of timeTicks(d0, d1, pw)) {
@@ -820,7 +894,7 @@
         }
         const binned = i1 > i0;
         const when = binned ? timeLabel(R, R.t[i0]) + ' — ' + fmtClock(R.t[i1]) : timeLabel(R, R.t[i0]);
-        showTip(evt, 'Ядро ' + r + ' · ' + when, [
+        showTip(evt, 'Ядро ' + r + (roles ? ' (' + roleInfo(roles[r] || 'shared').short + ')' : '') + ' · ' + when, [
           { name: binned ? 'Загрузка ядра (максимум)' : 'Загрузка ядра', value: v === null ? 'нет данных' : fmtPct(v) },
           { name: binned ? 'Все ядра (максимум)' : 'Все ядра в этот момент', value: busy === null ? '—' : fmtCores(busy) },
         ]);
@@ -896,7 +970,11 @@
   // ---------------------------------------------------------------------
 
   function table(columns, rows) {
-    const thead = el('thead', null, el('tr', null, columns.map((c) => el('th', { class: c.cls || null, scope: 'col', text: c.label }))));
+    // A column may have a short header for phones (c.short), shown below 480 px instead of c.label.
+    const th = (c) => (c.short
+      ? el('th', { class: c.cls || null, scope: 'col', title: c.label }, [el('span', { class: 'th-full', text: c.label }), el('span', { class: 'th-short', text: c.short })])
+      : el('th', { class: c.cls || null, scope: 'col', text: c.label }));
+    const thead = el('thead', null, el('tr', null, columns.map(th)));
     const tbody = el('tbody');
     fillBody(tbody, columns, rows);
     return { wrap: el('div', { class: 'table-wrap' }, el('table', null, [thead, tbody])), tbody: tbody };
@@ -1125,10 +1203,13 @@
         if (topCore.v >= 0.6 && topCore.v - med >= 0.35) {
           add(topCore.v >= 0.9 ? 'warning' : 'info',
             'Нагрузка по ядрам неравномерная: ядро ' + topCore.i + ' занято на ' + fmtPct(topCore.v) + ', медиана ' + fmtPct(med),
-            'Обычно так выглядит главный поток сервера: он однопоточный и грузит одно ядро, пока остальные свободны. ' +
+            (R.system.coreRoles && roleParts(R.system.coreRoles[topCore.i]).indexOf('tick') >= 0
+              ? 'Это ядро тика из раскладки ядер: на нём работает главный поток, так и задумано. '
+              : 'Обычно так выглядит главный поток сервера: он однопоточный и грузит одно ядро, пока остальные свободны. ') +
             'Если при этом есть лаги, сервер упирается в производительность одного ядра; помогает процессор с более высокой частотой, а не больше ядер.');
         }
       }
+      layoutFindings(R, add);
     }
 
     if (!out.some((f) => SEVERITY[f.severity].rank <= SEVERITY.warning.rank)) {
@@ -1157,6 +1238,107 @@
     const s = a.slice().sort((x, y) => x - y);
     const m = s.length >> 1;
     return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  // ---------------------------------------------------------------------
+  // Core layout (system.coreRoles)
+  // ---------------------------------------------------------------------
+
+  /** "0–3, 8, 10–11" for a sorted list of core indexes. */
+  function fmtCoreList(idx) {
+    const parts = [];
+    for (let i = 0; i < idx.length;) {
+      let j = i;
+      while (j + 1 < idx.length && idx[j + 1] === idx[j] + 1) j++;
+      parts.push(j > i ? idx[i] + '–' + idx[j] : String(idx[i]));
+      i = j + 1;
+    }
+    return parts.join(', ');
+  }
+
+  function coresLabel(idx) {
+    return (idx.length === 1 ? 'ядро ' : 'ядра ') + fmtCoreList(idx);
+  }
+
+  /** Small coloured role label («тик», «чанки», ...). */
+  function roleChip(role) {
+    const info = roleInfo(role);
+    const c = el('span', { class: 'role-chip' + (role === 'shared' ? ' shared' : ''), title: info.name, text: info.short });
+    c.style.setProperty('--role', info.color);
+    return c;
+  }
+
+  /** Whether thread group {@code group} runs on the cores of {@code role}. */
+  function roleHasGroup(role, group) {
+    const gs = CORE_ROLES[role].groups;
+    if (gs) return gs.indexOf(group) >= 0;
+    for (const id of ROLE_ORDER) {
+      const other = CORE_ROLES[id].groups;
+      if (other && other.indexOf(group) >= 0) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Per role present in the layout: its cores, their mean load (whole machine, 0..1 per core),
+   * the cores they were busy in total, and how many cores the role's own thread groups used.
+   */
+  function layoutStats(R) {
+    const roles = R.system.coreRoles;
+    if (!roles) return null;
+    const avg = coreAverages(R);
+    const out = [];
+    for (const id of ROLE_ORDER) {
+      const cores = [];
+      // A core with several roles ("chunks+gc") counts for each of them.
+      for (let k = 0; k < roles.length; k++) {
+        if (id === 'shared' ? roles[k] === 'shared' : roleParts(roles[k]).indexOf(id) >= 0) cores.push(k);
+      }
+      if (!cores.length) continue;
+      const loads = cores.map((k) => avg[k] || 0);
+      const busy = sum(loads);
+      let threadCores = null;
+      if (id !== 'shared') {
+        threadCores = 0;
+        for (const g of R.groups) if (roleHasGroup(id, g.id)) threadCores += g.avgCores;
+      }
+      out.push({ id: id, cores: cores, avgLoad: busy / cores.length, busyCores: busy, peakLoad: maxOf(loads) || 0, threadCores: threadCores });
+    }
+    return out;
+  }
+
+  function layoutFindings(R, add) {
+    const stats = layoutStats(R);
+    if (!stats) return;
+    const by = {};
+    for (const r of stats) by[r.id] = r;
+    const tick = by.tick, chunks = by.chunks;
+    const main = R.group('main');
+    const tickName = tick && tick.cores.length > 1 ? 'Ядра тика' : 'Ядро тика';
+    if (tick && tick.avgLoad >= 0.9 && chunks && chunks.avgLoad < 0.3) {
+      add('warning', 'Раскладка ядер: ' + tickName.toLowerCase() + ' загружено на ' + fmtPct(tick.avgLoad) + ', а ядра чанков почти простаивают (' + fmtPct(chunks.avgLoad) + ')',
+        'Главный поток один, и раскладка не может отдать ему соседние ядра: свободные ядра чанков тикам не помогут. ' +
+        'Ускоряет тики только уменьшение работы внутри тика (simulation-distance, лимиты мобов и сущностей, фермы, синхронные задачи плагинов) или процессор с более высокой частотой. ' +
+        'Если чанки и дальше простаивают, часть их ядер (' + fmtCoreList(chunks.cores) + ') можно отдать фоновым задачам: cpu.layout.chunks и cpu.layout.background в amazake.yml, затем /amazake reload.');
+    }
+    if (tick && main) {
+      const extra = tick.busyCores - main.avgCores;
+      if (extra >= 0.2) {
+        add(extra >= 0.4 ? 'warning' : 'info', 'На ядре тика работает не только главный поток: ещё ' + fmtCores(extra),
+          tickName + ' (' + fmtCoreList(tick.cores) + ') отдано главному потоку и загружено в среднем на ' + fmtCores(tick.busyCores) + ', а сам главный поток занимал ' + fmtCores(main.avgCores) + '. ' +
+          'Остальное — чужая нагрузка: раскладка закрепляет только потоки сервера, а другие процессы машины (Discord-бот, база данных, бэкап) система может запускать на этом же ядре и отнимать время у тиков. ' +
+          'Проверьте /amazake cores на сервере и top или htop на машине (столбец P — ядро процесса). Посторонний процесс можно перенести на ядра фона командой taskset -a -p -c <ядра> <pid>.');
+      }
+    }
+    for (const id of ['chunks', 'network', 'gc', 'background']) {
+      const r = by[id];
+      if (!r || r.avgLoad < 0.85) continue;
+      add(r.avgLoad >= 0.95 ? 'serious' : 'warning',
+        'Ядрам роли «' + CORE_ROLES[id].short + '» тесно: загружены в среднем на ' + fmtPct(r.avgLoad),
+        'Под роль «' + CORE_ROLES[id].name + '» отдано ' + r.cores.length + ' ' + coresWord(r.cores.length) + ' (' + fmtCoreList(r.cores) + '), её потоки заняли ' + fmtCores(r.threadCores) + '. ' +
+        'Пока эти ядра заняты, потоки роли ждут очереди, даже если другие ядра свободны: раскладка не пускает их туда. ' +
+        'Дайте роли больше ядер в amazake.yml (cpu.layout.' + id + ') и выполните /amazake reload, или верните там "auto".');
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -1523,7 +1705,33 @@
     const topCard = card({ title: 'Кто ест процессор', desc: 'Среднее число занятых ядер по группам потоков.', cls: 'side' },
       R.groups.length ? [top, el('div', { class: 'card-foot' }, goThreads)] : el('p', { class: 'empty', text: 'В отчёте нет данных о группах потоков.' }));
 
-    return [grid, el('div', { class: 'overview-split' }, [findCard, topCard])];
+    const layoutCard = coreLayoutCard(R);
+    if (!layoutCard) return [grid, el('div', { class: 'overview-split' }, [findCard, topCard])];
+    topCard.classList.remove('side');
+    return [grid, el('div', { class: 'overview-split' }, [findCard, el('div', { class: 'side side-stack' }, [topCard, layoutCard])])];
+  }
+
+  /** Overview card «Раскладка ядер»: each role, its cores and how busy they were. Null without a layout. */
+  function coreLayoutCard(R) {
+    const stats = layoutStats(R);
+    if (!stats) return null;
+    const list = el('div', { class: 'toplist' });
+    for (const r of stats) {
+      const bar = el('div', { class: 'share-bar' });
+      const fill = el('span');
+      fill.style.width = clamp(r.avgLoad * 100, 0, 100).toFixed(1) + '%';
+      fill.style.background = CORE_ROLES[r.id].color;
+      bar.appendChild(fill);
+      list.appendChild(el('div', { class: 'toplist-row' }, [
+        el('div', { class: 'toplist-name' }, [roleChip(r.id), el('span', { class: 'mono', text: coresLabel(r.cores) })]),
+        el('span', { class: 'toplist-val mono', text: fmtPct(r.avgLoad) }),
+        bar,
+      ]));
+    }
+    const go = el('button', { class: 'btn btn-ghost btn-small', type: 'button' }, ['Ядра', icon('arrow')]);
+    go.addEventListener('click', () => setTab('cores', true));
+    return card({ title: 'Раскладка ядер', desc: 'У каждого ядра своя работа (amazake.yml, cpu.layout). Справа — средняя загрузка ядер роли.' },
+      [list, el('div', { class: 'card-foot' }, go)]);
   }
 
   function swatch(id) {
@@ -1539,6 +1747,42 @@
   const CORES_COMPACT = 32;
   const CORES_TOP = 16;
 
+  /** Chips above the heatmap: which cores each role has. */
+  function roleLegend(R) {
+    const box = el('div', { class: 'role-legend' });
+    for (const r of layoutStats(R) || []) {
+      box.appendChild(el('span', { class: 'role-legend-item' }, [roleChip(r.id), el('span', { class: 'mono', text: fmtCoreList(r.cores) })]));
+    }
+    return box;
+  }
+
+  /** «Раскладка ядер» on the cores tab: per role, its cores, their load and its own threads' load. */
+  function layoutTableCard(R) {
+    const stats = layoutStats(R);
+    if (!stats) return null;
+    const columns = [
+      { label: 'Роль', render: (r) => el('span', { class: 'role-cell' }, [roleChip(r.id), el('span', { class: 'role-name', text: CORE_ROLES[r.id].name })]) },
+      { label: 'Ядра', cls: 'mono nowrap', render: (r) => fmtCoreList(r.cores) },
+      { label: 'Загрузка ядер', short: 'Загрузка', cls: 'num', render: (r) => {
+        const m = el('div', { class: 'meter' });
+        const fill = el('span');
+        fill.style.width = clamp(r.avgLoad * 100, 0, 100).toFixed(1) + '%';
+        fill.style.background = r.avgLoad >= 0.9 ? statusVar('bad') : r.avgLoad >= 0.7 ? statusVar('warn') : CORE_ROLES[r.id].color;
+        m.appendChild(fill);
+        return el('span', { class: 'role-load' }, [m, el('span', { class: 'mono', text: fmtPct(r.avgLoad) })]);
+      } },
+      { label: 'Свои потоки', short: 'Потоки', cls: 'num mono', render: (r) => (r.threadCores === null ? '—'
+        : el('span', null, [el('span', { class: 'th-full', text: fmtCores(r.threadCores) }), el('span', { class: 'th-short', text: fmtCoresShort(r.threadCores) })])) },
+    ];
+    const t = table(columns, stats);
+    t.wrap.classList.add('layout-table');
+    return card({
+      title: 'Раскладка ядер',
+      desc: 'Сервер закрепил группы потоков за своими ядрами (amazake.yml, cpu.layout). «Загрузка ядер» — средняя загрузка этих ядер всеми процессами машины, ' +
+        '«Свои потоки» — сколько ядер в среднем заняли потоки этой роли. Если ядра загружены заметно больше, чем свои потоки, на них работает кто-то ещё.',
+    }, t.wrap);
+  }
+
   function tabCores(R) {
     const C = R.system.logicalCores;
     const out = [];
@@ -1548,8 +1792,12 @@
         title: 'Загрузка ядер',
         desc: 'Строка — логическое ядро, столбец — интервал замера (в длинных замерах соседние интервалы объединяются, клетка показывает максимум). Чем ярче, тем сильнее загружено ядро всеми процессами машины.',
         right: heatLegend(),
-      }, heatmap(R)));
-      const bars = el('div', { class: 'core-bars' });
+      }, [R.system.coreRoles ? roleLegend(R) : null, heatmap(R)]));
+      const layout = R.system.coreRoles ? layoutTableCard(R) : null;
+      if (layout) out.push(layout);
+      const roles = R.system.coreRoles;
+      const combined = roles && roles.some((v) => v.indexOf('+') >= 0);
+      const bars = el('div', { class: 'core-bars' + (roles ? ' has-roles' : '') + (combined ? ' combined-roles' : '') });
       const coreBar = (k) => {
         const v = avg[k];
         const st = v >= 0.9 ? 'bad' : v >= 0.7 ? 'warn' : null;
@@ -1559,7 +1807,7 @@
         fill.style.background = st ? statusVar(st) : 'var(--accent)';
         m.appendChild(fill);
         return el('div', { class: 'core-bar' }, [
-          el('span', { class: 'name mono', text: 'ядро ' + k }), m, el('span', { class: 'val mono', text: fmtPct(v) }),
+          el('span', { class: 'name mono', text: 'ядро ' + k }), roles ? roleChip(roles[k] || 'shared') : null, m, el('span', { class: 'val mono', text: fmtPct(v) }),
         ]);
       };
       const fillBars = (idx) => {

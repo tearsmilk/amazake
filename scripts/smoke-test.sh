@@ -33,7 +33,9 @@ fi
 mkfifo input
 # Keep the fifo open for writing so the server never sees end-of-input.
 exec 3<>input
-java -Xmx2G -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar "$jar" --nogui < input > server.log 2>&1 &
+# The core layout (amazake.yml cpu.layout) is only applied with -XX:ActiveProcessorCount, as the README says.
+cpus=$(nproc)
+java -Xmx2G -XX:ActiveProcessorCount="$cpus" -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar "$jar" --nogui < input > server.log 2>&1 &
 pid=$!
 for _ in $(seq 1 600); do
   grep -q 'Done (' server.log && break
@@ -48,6 +50,7 @@ send "amazake version"
 # Point the profiler at the local site, then reload the settings.
 sed -i -E "s|^([[:space:]]*upload-url:).*|\1 http://127.0.0.1:$site_port|" amazake.yml
 send "amazake reload"
+send "amazake cores"
 send "spark tps"
 send "amazake profile 5" 15
 # The /amazake profile link, taken now: the stress run below uploads a second report.
@@ -87,6 +90,25 @@ else
 fi
 if [ -f amazake.yml ]; then echo "ok: amazake.yml written"; cat amazake.yml; else echo "MISSING: amazake.yml"; fail=1; fi
 
+# The core layout: one English line at startup (and on reload), and the /amazake cores table.
+echo "---- core layout ($cpus CPUs) ----"
+grep -E 'Amazake cores:' server.log || true
+if [ "$cpus" -ge 2 ]; then
+  check 'Amazake cores: tick=\[[0-9,-]+\] chunks=\[' "the core layout is applied at startup"
+  if grep -qE 'Amazake cores: disabled' server.log; then
+    echo "FOUND: the core layout was disabled on a $cpus-CPU runner"; fail=1
+  else
+    echo "ok: the core layout was not disabled"
+  fi
+  check 'Раскладка ядер включена: tick=\[' "/amazake cores says the layout is on"
+  check '[[:space:]]0  tick[[:space:]]+[0-9]+%' "/amazake cores prints the core -> role table with the load"
+  check 'Потоки по группам' "/amazake cores lists where the thread groups run"
+  check 'main \(tick\): 1 -> \[' "/amazake cores shows the main thread on the tick core"
+else
+  check 'Amazake cores: disabled \(only [0-9]+ CPU' "the core layout says why it is off on $cpus CPU"
+  check 'Раскладка ядер выключена' "/amazake cores says the layout is off"
+fi
+
 # The profile was uploaded: the server printed a /r/<id> link, and the site gives the report back.
 id=$amazake_id
 if [ -z "$id" ]; then
@@ -94,17 +116,29 @@ if [ -z "$id" ]; then
 else
   echo "ok: /amazake profile uploaded report $id"
   curl -fsS "http://127.0.0.1:$site_port/api/reports/$id" -o report.json
-  if python3 - report.json <<'EOF'
+  if python3 - report.json "$cpus" <<'EOF'
 import json, sys
 r = json.load(open(sys.argv[1]))
+cpus = int(sys.argv[2])
 assert r["format"] == "amazake-profile" and r["version"] == 1, "format"
 assert r["server"]["brand"] == "Amazake", r["server"]["brand"]
 assert len(r["samples"]) >= 3, "samples: %d" % len(r["samples"])
 groups = {g["group"] for g in r["groups"]}
 assert "main" in groups, "no main thread group: %s" % sorted(groups)
 assert any(t["name"] == "Server thread" for t in r["threads"]), "no Server thread"
-print("report: %d samples, %d threads, groups %s, %d cores, per-core %s" % (
-    len(r["samples"]), len(r["threads"]), sorted(groups), r["system"]["logicalCores"], r["system"]["perCore"]))
+sysinfo = r["system"]
+assert sysinfo["logicalCores"] == cpus, "logicalCores %s, nproc %d" % (sysinfo["logicalCores"], cpus)
+if sysinfo["perCore"] and cpus >= 2:
+    roles = sysinfo.get("coreRoles")
+    assert isinstance(roles, list), "no system.coreRoles while the core layout is on"
+    assert len(roles) == sysinfo["logicalCores"], "coreRoles %d entries, logicalCores %d" % (len(roles), sysinfo["logicalCores"])
+    known = {"tick", "chunks", "network", "gc", "background"}
+    for role in roles:
+        assert role == "shared" or set(role.split("+")) <= known, "unknown core role %r" % role
+    assert roles.count("tick") == 1, "one tick core expected: %s" % roles
+    assert all(len(s["cores"]) == len(roles) for s in r["samples"] if s.get("cores")), "samples[].cores length"
+print("report: %d samples, %d threads, groups %s, %d cores, per-core %s, core roles %s" % (
+    len(r["samples"]), len(r["threads"]), sorted(groups), sysinfo["logicalCores"], sysinfo["perCore"], sysinfo.get("coreRoles")))
 EOF
   then echo "ok: the report is a valid Amazake profile"; else echo "BAD: the report is not what the contract says"; fail=1; fi
   if curl -fsS "http://127.0.0.1:$site_port/r/$id" | grep -qi '<html'; then echo "ok: /r/$id serves the viewer"; else echo "MISSING: viewer page"; fail=1; fi

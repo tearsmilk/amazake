@@ -20,9 +20,12 @@ final class CpuSampler {
 
     private final com.sun.management.OperatingSystemMXBean os;
     private final boolean perCore;
-    private final int logicalCores = Runtime.getRuntime().availableProcessors();
+    // Not Runtime.availableProcessors(): that answers from the calling thread's CPU set, and with the
+    // core layout this is created on the main thread, pinned to the tick CPU.
+    private final int logicalCores = ink.hoka.amazake.cpu.CpuTopology.availableProcessors();
 
     private long[][] lastCores;
+    private int[] lastCoreIds;
     private long[] lastTotal;
     private long lastProcessCpuNs = -1L;
 
@@ -34,6 +37,15 @@ final class CpuSampler {
 
     boolean perCore() {
         return this.perCore;
+    }
+
+    /**
+     * The logical CPU id (N of "cpuN" in /proc/stat) of each entry of {@link CpuSample#cores()}, in the
+     * same order; null when per-core data is not available. Offline CPUs are missing from /proc/stat,
+     * so an index is not always the CPU id.
+     */
+    int[] coreIds() {
+        return this.lastCoreIds == null ? null : this.lastCoreIds.clone();
     }
 
     /** Takes the starting point the first sample is measured against. */
@@ -81,25 +93,32 @@ final class CpuSampler {
         if (!this.perCore) {
             return;
         }
-        final List<long[]> lines = readProcStat();
-        if (lines == null || lines.isEmpty()) {
+        final ProcStat stat = readProcStat();
+        if (stat == null) {
             this.lastCores = null;
+            this.lastCoreIds = null;
             this.lastTotal = null;
             return;
         }
-        this.lastTotal = lines.get(0);
-        this.lastCores = lines.subList(1, lines.size()).toArray(new long[0][]);
+        this.lastTotal = stat.total();
+        this.lastCores = stat.cores();
+        this.lastCoreIds = stat.ids();
     }
 
-    /** The "cpu" line first, then each "cpuN" line, as their counters; null when unreadable. */
-    private static List<long[]> readProcStat() {
+    /** The "cpu" line's counters, then each "cpuN" line's counters with its N, in file order. */
+    private record ProcStat(long[] total, long[][] cores, int[] ids) {
+    }
+
+    /** /proc/stat's CPU lines; null when unreadable or without the "cpu" total line. */
+    private static ProcStat readProcStat() {
         final List<String> lines;
         try {
             lines = Files.readAllLines(PROC_STAT);
         } catch (final IOException | RuntimeException e) {
             return null;
         }
-        final List<long[]> out = new ArrayList<>();
+        final List<long[]> cores = new ArrayList<>();
+        final List<Integer> ids = new ArrayList<>();
         long[] total = null;
         for (final String line : lines) {
             if (!line.startsWith("cpu")) {
@@ -107,9 +126,13 @@ final class CpuSampler {
             }
             final String[] parts = line.trim().split("\\s+");
             final long[] counters = new long[parts.length - 1];
+            int id = -1;
             try {
                 for (int i = 1; i < parts.length; i++) {
                     counters[i - 1] = Long.parseLong(parts[i]);
+                }
+                if (!"cpu".equals(parts[0])) {
+                    id = Integer.parseInt(parts[0].substring(3));
                 }
             } catch (final NumberFormatException e) {
                 continue;
@@ -117,14 +140,18 @@ final class CpuSampler {
             if ("cpu".equals(parts[0])) {
                 total = counters;
             } else {
-                out.add(counters);
+                cores.add(counters);
+                ids.add(id);
             }
         }
         if (total == null) {
             return null;
         }
-        out.add(0, total);
-        return out;
+        final int[] idArray = new int[ids.size()];
+        for (int i = 0; i < idArray.length; i++) {
+            idArray[i] = ids.get(i);
+        }
+        return new ProcStat(total, cores.toArray(new long[0][]), idArray);
     }
 
     /**

@@ -81,7 +81,7 @@ final class EnvironmentInfo {
         return new Report.SystemInfo(
             System.getProperty("os.name", "") + " " + System.getProperty("os.version", ""),
             System.getProperty("os.arch", ""),
-            Runtime.getRuntime().availableProcessors(),
+            Cpus.logical(),
             cpuModel(),
             totalMemory,
             Runtime.getRuntime().maxMemory(),
@@ -139,7 +139,7 @@ final class EnvironmentInfo {
                 }
             }
         }
-        final int netty = Integer.getInteger("io.netty.eventLoopThreads", Runtime.getRuntime().availableProcessors() * 2);
+        final int netty = Integer.getInteger("io.netty.eventLoopThreads", Cpus.logical() * 2);
         return new Report.ThreadPools(workers, io, netty);
     }
 

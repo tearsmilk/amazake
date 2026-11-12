@@ -55,7 +55,8 @@ record Report(
         Long totalMemoryBytes,
         long heapMaxBytes,
         boolean perCore,
-        String perThreadSource
+        String perThreadSource,
+        List<String> coreRoles
     ) {
     }
 

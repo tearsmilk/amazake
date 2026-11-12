@@ -174,12 +174,32 @@ final class ProfilerSession implements Runnable {
             durationMs,
             this.intervalMs,
             EnvironmentInfo.server(this.start, this.finalWorlds()),
-            EnvironmentInfo.system(this.cpu.perCore(), this.threadCpu.source()),
+            EnvironmentInfo.system(this.cpu.perCore(), this.threadCpu.source(), this.reportedCoreIds()),
             List.copyOf(this.samples),
             threads,
             groupEntries,
             spikes
         );
+    }
+
+    /**
+     * The CPU id of each entry of samples[].cores: the ids of the last /proc/stat read, cut to the
+     * last sample's core count; null without per-core samples or when they do not line up.
+     */
+    private int[] reportedCoreIds() {
+        int count = -1;
+        for (int i = this.samples.size() - 1; i >= 0; i--) {
+            final double[] cores = this.samples.get(i).cores();
+            if (cores != null) {
+                count = cores.length;
+                break;
+            }
+        }
+        final int[] ids = this.cpu.coreIds();
+        if (count <= 0 || ids == null || ids.length < count) {
+            return null;
+        }
+        return java.util.Arrays.copyOf(ids, count);
     }
 
     /**

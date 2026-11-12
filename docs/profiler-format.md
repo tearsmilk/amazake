@@ -62,12 +62,13 @@ Rules:
 |---|---|---|
 | `os` | string | `os.name` + `os.version` |
 | `arch` | string | `os.arch` |
-| `logicalCores` | int | `Runtime.availableProcessors()` |
+| `logicalCores` | int | Logical CPUs the server may use: the process's CPU set without offline CPUs, capped by a cgroup CPU quota (rounded up). This is what `Runtime.availableProcessors()` answers before any thread is pinned; it is read once at startup because, once the core layout pins threads, `availableProcessors()` answers from the calling thread's CPU set. Not Linux: `Runtime.availableProcessors()` |
 | `cpuModel` | string, *optional* | From `/proc/cpuinfo` (`model name`) on Linux |
 | `totalMemoryBytes` | long, *optional* | Physical memory |
 | `heapMaxBytes` | long | `-Xmx` |
 | `perCore` | bool | Whether `samples[].cores` holds per-core loads (Linux `/proc/stat`); false elsewhere |
 | `perThreadSource` | string | `"proc"` (Linux `/proc/self/task`: JVM-internal threads such as GC and JIT included) or `"jmx"` (Java threads only) |
+| `coreRoles` | string[], *optional* | The core layout's job of each logical core, one per entry of `samples[].cores` and in the same order (the N of `cpuN` in `/proc/stat`). Values: `tick` (main thread), `chunks` (chunk workers and chunk I/O), `network` (Netty), `gc` (GC, JIT, VM threads; stop-the-world GC workers run on every core during a pause), `background` (all other threads); several roles on one core are joined with `+` in this order, e.g. `chunks+gc` and `network+background` (the automatic layouts for 2 to 4 cores always combine roles); `shared` means no role: an idle core (the tick core's SMT sibling) or one outside the CPUs the server may use. Readers should split on `+` and treat unknown names as `shared`. Present only when `perCore` and a core layout (`amazake.yml` `cpu.layout`) is active |
 
 ## `samples[]`
 

@@ -2,9 +2,13 @@ package ink.hoka.amazake;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import ink.hoka.amazake.cpu.Cores;
+import ink.hoka.amazake.cpu.Role;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 /**
@@ -42,6 +46,15 @@ public final class AmazakeConfig {
     public static int profilerMaxSeconds = 600;
     /** Time between two samples, milliseconds (at least 250). */
     public static int profilerIntervalMs = 1000;
+
+    /** Core layout: pin thread groups to their own CPUs (Linux, at least 2 CPUs). */
+    public static boolean cpuLayoutEnabled = true;
+    /** cpu.layout.&lt;role&gt;: "auto" or a CPU list such as "1-3". */
+    public static Map<Role, String> cpuLayoutRoles = Map.of();
+    /** Size Paper's chunk worker pool to the chunks CPUs. */
+    public static boolean cpuLayoutResizeChunkPool = true;
+    /** Pin threads even without -XX:ActiveProcessorCount. */
+    public static boolean cpuLayoutIgnoreProcessorCount = false;
 
     private AmazakeConfig() {
     }
@@ -92,12 +105,42 @@ public final class AmazakeConfig {
         profilerIntervalMs = Math.min(4000, Math.max(250, integer("profiler.interval-ms", 1000,
             "Интервал между замерами, в миллисекундах (от 250 до 4000).")));
 
+        cpuLayoutEnabled = bool("cpu.layout.enabled", true,
+            "Раскладка ядер: каждое ядро процессора получает свою работу.",
+            "Главный поток (tick), чанки (chunks), сеть (network), GC и JIT (gc) и всё остальное (background)",
+            "закрепляются каждый за своими ядрами, чтобы не мешать друг другу.",
+            "Работает только на Linux, если серверу доступно хотя бы 2 ядра; нужна команда taskset (util-linux)",
+            "и флаг запуска -XX:ActiveProcessorCount=<число ядер>. Тики сами по себе не ускоряются:",
+            "раскладка только убирает помехи главному потоку, а остальным задачам достаётся меньше ядер.",
+            "Таблицу раскладки и загрузку ядер показывает /amazake cores.");
+        final Map<Role, String> roles = new EnumMap<>(Role.class);
+        roles.put(Role.TICK, cpuList("cpu.layout.tick",
+            "Ядра для главного потока (тики мира). auto или список: 0, 1-3, 1,2,5.",
+            "В auto главный поток получает целое физическое ядро; его второй поток (SMT) остаётся свободным,",
+            "если ядер 8 и больше."));
+        roles.put(Role.CHUNKS, cpuList("cpu.layout.chunks",
+            "Ядра для чанков: генерация, загрузка, свет, чтение и запись регионов. auto: около 40% остальных ядер."));
+        roles.put(Role.NETWORK, cpuList("cpu.layout.network",
+            "Ядра для сети (Netty: пакеты, сжатие, шифрование). auto: одно ядро."));
+        roles.put(Role.GC, cpuList("cpu.layout.gc",
+            "Ядра для сборщика мусора, JIT-компилятора и служебных потоков JVM. auto: около 15% остальных ядер."));
+        roles.put(Role.BACKGROUND, cpuList("cpu.layout.background",
+            "Ядра для всего остального: плагины, чат, фоновые задачи Paper, spark. auto: оставшиеся ядра."));
+        cpuLayoutRoles = Map.copyOf(roles);
+        cpuLayoutResizeChunkPool = bool("cpu.layout.resize-chunk-pool", true,
+            "Сделать в пуле чанков Paper столько потоков, сколько ядер у chunks.",
+            "Не действует, если в paper-global.yml задано chunk-system.worker-threads больше 0.");
+        cpuLayoutIgnoreProcessorCount = bool("cpu.layout.ignore-processor-count", false,
+            "Закреплять потоки, даже если нет флага -XX:ActiveProcessorCount. Без флага Java после закрепления",
+            "считает ядра по потоку (у главного - 1), и пулы потоков плагинов получаются слишком маленькими.");
+
         try {
             yaml.save(file);
         } catch (final IOException e) {
             LOGGER.log(Level.WARNING, "Could not write " + file, e);
         }
         LOGGER.info("Loaded " + file.getName());
+        Cores.configure(cpuLayoutEnabled, cpuLayoutRoles, cpuLayoutResizeChunkPool, cpuLayoutIgnoreProcessorCount);
         return true;
     }
 
@@ -123,6 +166,32 @@ public final class AmazakeConfig {
         }
         yaml.setComments(path, List.of(comment));
         return yaml.getString(path, def);
+    }
+
+    /**
+     * A CPU list setting: "auto", a number (YAML reads "tick: 0" as an int) or a list ("1-3", "1,2,5",
+     * or a YAML list [1, 2]). Returned as text; LayoutPlanner checks it and warns when it is wrong.
+     */
+    private static String cpuList(final String path, final String... comment) {
+        final Object value = yaml.get(path);
+        final String text;
+        if (value instanceof List<?> list && !list.isEmpty()) {
+            final StringBuilder joined = new StringBuilder();
+            for (final Object item : list) {
+                if (joined.length() > 0) {
+                    joined.append(',');
+                }
+                joined.append(item);
+            }
+            text = joined.toString();
+        } else if (value instanceof Number || (value instanceof String string && !string.isBlank())) {
+            text = value.toString().trim();
+        } else {
+            text = "auto";
+            yaml.set(path, text);
+        }
+        yaml.setComments(path, List.of(comment));
+        return text;
     }
 
     public static File file() {

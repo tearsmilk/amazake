@@ -23,7 +23,7 @@ final class CpuSampler {
 
     private final com.sun.management.OperatingSystemMXBean os;
     private final boolean perCore;
-    private final int logicalCores = Runtime.getRuntime().availableProcessors();
+    private final int logicalCores = Cpus.logical();
 
     private long[][] lastCores;
     private long[] lastTotal;

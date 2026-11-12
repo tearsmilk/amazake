@@ -552,6 +552,9 @@ button, input, textarea { font: inherit; color: inherit; }
 
 .overview-split .side { position: sticky; top: calc(var(--head-h, 104px) + 16px); }
 
+/* two cards in the side column are too tall to stick */
+.overview-split .side-stack { position: static; display: grid; gap: 16px; min-width: 0; }
+
 /* --- findings -------------------------------------------------------- */
 
 .findings { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
@@ -774,6 +777,54 @@ button, input, textarea { font: inherit; color: inherit; }
 .core-bar { display: grid; grid-template-columns: 64px 1fr 48px; align-items: center; gap: 10px; font-size: 12.5px; }
 
 .core-bar .name { color: var(--muted); }
+
+.core-bars.has-roles .core-bar { grid-template-columns: 56px 50px 1fr 44px; gap: 8px; }
+.core-bars.combined-roles .core-bar { grid-template-columns: 56px 78px 1fr 44px; }
+
+/* --- core layout roles (system.coreRoles) ------------------------------ */
+
+.role-chip {
+  --role: var(--s-rest);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: var(--ink);
+  background: var(--surface-3);
+  background: color-mix(in srgb, var(--role) 26%, transparent);
+  box-shadow: inset 3px 0 0 var(--role);
+  flex: none;
+}
+
+.role-chip.shared { color: var(--muted); background: var(--surface-3); }
+
+.role-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 12px; font-size: 12.5px; color: var(--ink-2); }
+
+.role-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+
+td.nowrap { white-space: nowrap; }
+
+.role-cell { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+
+.role-load { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; width: 100%; }
+
+.role-load .meter { width: 90px; flex: none; }
+
+.th-short { display: none; }
+
+.chart .role-chip-bg { opacity: 0.3; }
+
+.chart .role-chip-bg.shared { opacity: 0.18; }
+
+.chart text.role-chip-text { fill: var(--ink); font-size: 10px; font-weight: 650; }
+
+.chart .role-strip { opacity: 0.9; }
 
 .core-bar .val { text-align: right; color: var(--ink); }
 
@@ -1259,6 +1310,11 @@ details.jvm[open] .chev { transform: rotate(90deg); }
   .sc-label { white-space: normal; }
   .dropzone { padding: 24px 14px; }
   .core-bars { grid-template-columns: minmax(0, 1fr); }
+  .role-cell .role-name { display: none; }
+  /* «Раскладка ядер» fits 356 px: no load bar, short headers and numbers without the unit */
+  .layout-table .role-load .meter { display: none; }
+  .layout-table .th-full { display: none; }
+  .layout-table .th-short { display: inline; }
 }
 
 @media (max-width: 340px) {

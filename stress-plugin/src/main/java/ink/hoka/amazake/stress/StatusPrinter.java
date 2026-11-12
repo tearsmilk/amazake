@@ -122,7 +122,7 @@ public final class StatusPrinter {
         lines.add("AmazakeStress " + plugin.getPluginMeta().getVersion() + " — итог прогона");
         lines.add("Сервер: " + Bukkit.getName() + " " + Bukkit.getVersion() + " (MC " + Bukkit.getMinecraftVersion() + ")");
         lines.add("Java: " + System.getProperty("java.vm.name") + " " + System.getProperty("java.version")
-            + ", ядер: " + rt.availableProcessors() + ", Xmx: " + (rt.maxMemory() >> 20) + " МБ");
+            + ", ядер: " + ink.hoka.amazake.stress.profiler.Cpus.logical() + ", Xmx: " + (rt.maxMemory() >> 20) + " МБ");
         lines.add("JVM-флаги: " + String.join(" ", ManagementFactory.getRuntimeMXBean().getInputArguments()));
         lines.add("Начало: " + TIME.format(Instant.ofEpochMilli(run.startedAtMillis())) + ", режим: "
             + (run.isSingleMode() ? "модуль " + run.mode() : "all") + ", сид: " + run.config().seed()
