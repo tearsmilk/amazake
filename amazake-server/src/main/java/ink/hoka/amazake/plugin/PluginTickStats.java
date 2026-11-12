@@ -4,7 +4,7 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadMXBean;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.IdentityHashMap;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,7 +48,8 @@ public final class PluginTickStats {
     private static volatile Boolean threadCpuSupported;
 
     // ---- tick-thread state (plain fields: only the tick thread touches them) ----
-    private static final IdentityHashMap<Plugin, Integer> INDEX = new IdentityHashMap<>();
+    /** By plugin name, not by Plugin: holding Plugin objects would keep a disabled or reloaded plugin's class loader alive. */
+    private static final HashMap<String, Integer> INDEX = new HashMap<>();
     private static String[] names = new String[0];
     private static long[][] nanos = new long[0][];
     private static long[] calls = new long[0];
@@ -98,7 +99,7 @@ public final class PluginTickStats {
      * @return a token for {@link #exit}, or -1 when not recording, off the tick thread or without a plugin
      */
     public static int enter(final Plugin plugin, final int kind) {
-        if (!enabled || plugin == null || !ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
+        if (!enabled || plugin == null || !onServerThread()) {
             return -1;
         }
         return enterAt(indexOf(plugin), kind, System.nanoTime());
@@ -144,19 +145,29 @@ public final class PluginTickStats {
         }
     }
 
+    /**
+     * Only the server thread records. TickThread.isTickThread() is not enough: Paper's watchdog thread is a
+     * TickThread too and fires plugin events while it stops a hung server, which would race the counters.
+     */
+    private static boolean onServerThread() {
+        final net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
+        return server != null && Thread.currentThread() == server.getRunningThread();
+    }
+
     // ---- the accounting, with an explicit clock (unit-tested) ----
 
     static int indexOf(final Plugin plugin) {
-        final Integer known = INDEX.get(plugin);
+        final String name = plugin.getName();
+        final Integer known = INDEX.get(name);
         if (known != null) {
             return known;
         }
-        final int index = register(plugin.getName());
-        INDEX.put(plugin, index);
+        final int index = register(name);
+        INDEX.put(name, index);
         return index;
     }
 
-    /** A new plugin slot (a reloaded plugin with the same name gets another slot; the report merges by name). */
+    /** A new plugin slot (one per plugin name). */
     static int register(final String name) {
         final int index = names.length;
         names = Arrays.copyOf(names, index + 1);

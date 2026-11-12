@@ -108,8 +108,8 @@ public final class AffinityManager {
     private record Applied(String comm, String cpus, boolean niced, long firstSeen) {
     }
 
-    /** An unknown ("other") thread is reniced only after it has been watched this long (two stack checks). */
-    static final long OTHER_NICE_DELAY_MS = 2 * PluginThreads.RECHECK_SECONDS * 1000L + 5_000L;
+    /** The process's nice when the manager started (its first thread's), Integer.MIN_VALUE until read. */
+    private int baseNice = Integer.MIN_VALUE;
     /** cpu.layout.support-nice by default. */
     public static final int DEFAULT_SUPPORT_NICE = 5;
 
@@ -709,7 +709,7 @@ public final class AffinityManager {
         }
         final List<PinnedThread> seen = new ArrayList<>();
         final Set<Integer> alive = new HashSet<>();
-        final Set<String> pluginComms = this.pluginThreads == null ? Set.of() : this.pluginThreads.refresh();
+        final Set<String> pluginComms = this.pluginThreads == null || layout == null ? Set.of() : this.pluginThreads.refresh();
         // Priorities matter only where plugin threads share CPUs with support threads.
         final int nice = this.supportNice;
         final boolean prioritize = layout != null && nice > 0 && this.niceProblem == null && !layout.spillCpus().isEmpty();
@@ -768,9 +768,16 @@ public final class AffinityManager {
                     this.applied.put(tid, new Applied(comm, wanted, isNiced, firstSeen));
                 }
             }
-            if (prioritize && !isNiced && wanted != null && wanted.equals(current) && role == Role.BACKGROUND
-                && demotable(comm, group) && (!ThreadClassifier.OTHER.equals(group)
-                    || now - firstSeen >= TimeUnit.MILLISECONDS.toNanos(OTHER_NICE_DELAY_MS))) {
+            if (prioritize && !isNiced && mustKeepPriority(comm, role)) {
+                // Safety net: a demotion leaked through nice inheritance. Stop demoting for good.
+                final int threadNice = niceOf(this.readStat(tid));
+                if (threadNice != Integer.MIN_VALUE && threadNice > this.baseNice()) {
+                    this.niceFailed("поток " + tid + " (" + comm + ") унаследовал пониженный приоритет nice " + threadNice
+                        + " от фонового потока; понижение приоритетов отключено до перезапуска");
+                }
+            }
+            if (prioritize && this.niceProblem == null && !isNiced && wanted != null && wanted.equals(current)
+                && role == Role.BACKGROUND && demotable(comm, group)) {
                 isNiced = this.raiseNice(tid, comm, nice);
                 if (isNiced) {
                     this.applied.put(tid, new Applied(comm, wanted, true, firstSeen));
@@ -861,20 +868,30 @@ public final class AffinityManager {
     }
 
     /**
-     * Whether a support thread of this group may run at a lower priority: Paper's own housekeeping, spark,
-     * Amazake and unknown threads, but never threads that may run plugin callbacks ("Paper Async Task
-     * Handler", the JDK common pool and other ForkJoinPools that CompletableFuture.supplyAsync and parallel
-     * streams use implicitly) or must not be slowed down (the watchdogs). Excluding the ForkJoinPool workers
-     * also keeps new workers, which inherit the nice of the worker that spawns them, at nice 0.
+     * Whether a support thread may run at a lower priority. Only threads known to be server housekeeping that
+     * never run plugin code are demoted: spark, Amazake's own threads and a few Paper/vanilla leaf threads.
+     * Unknown ("other") threads are never demoted: an idle plugin pool (a database pool, a timer, an executor)
+     * looks exactly like one, a demotion cannot be undone without CAP_SYS_NICE, and Linux copies nice to every
+     * thread the demoted one creates (pool workers created by a submitting thread included). "Server console
+     * handler" runs plugins' tab-complete listeners, the watchdogs must never be slowed down, and "Paper Async
+     * Task Handler" may run plugin callbacks, so they keep their priority too.
      */
     static boolean demotable(final String comm, final String group) {
         return switch (group) {
             case ThreadClassifier.SPARK, ThreadClassifier.AMAZAKE -> true;
-            case ThreadClassifier.OTHER -> !comm.startsWith("ForkJoinPool");
-            case ThreadClassifier.PAPER_ASYNC -> !comm.startsWith("Paper Async Tas") && !comm.startsWith("Paper Watchdog")
-                && !comm.startsWith("Server Watchdog");
+            case ThreadClassifier.PAPER_ASYNC -> comm.startsWith("Timer hack thre") || comm.startsWith("Chat-Filter-Wor")
+                || comm.startsWith("Download-");
             default -> false;
         };
+    }
+
+    /**
+     * Threads whose nice must stay at the process's original value: plugin threads and the JDK's shared pools
+     * (CompletableFuture/parallel streams). If one of them is found reniced although Amazake did not demote it,
+     * it inherited the nice from a demoted thread that created it.
+     */
+    static boolean mustKeepPriority(final String comm, final Role role) {
+        return role == Role.PLUGINS || comm.startsWith("ForkJoinPool");
     }
 
     /** Nice of a thread: field 19 of /proc/PID/task/TID/stat; Integer.MIN_VALUE when unknown. */
@@ -941,6 +958,23 @@ public final class AffinityManager {
             process.destroyForcibly();
             Thread.currentThread().interrupt();
             return false;
+        }
+    }
+
+    /** The nice threads normally have in this process: the first thread's (the JVM's initial thread) at the first call. */
+    private int baseNice() {
+        if (this.baseNice == Integer.MIN_VALUE) {
+            final int pidNice = niceOf(this.readStatFile(this.tasks.getParent().resolve("stat")));
+            this.baseNice = pidNice == Integer.MIN_VALUE ? 0 : pidNice;
+        }
+        return this.baseNice;
+    }
+
+    private String readStatFile(final Path file) {
+        try {
+            return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+        } catch (final IOException | RuntimeException e) {
+            return null;
         }
     }
 

@@ -136,13 +136,19 @@ class ThreadClassifierTest {
     @Test
     void supportThreadsThatMayBeDemoted() {
         assertEquals(true, AffinityManager.demotable("spark-worker-po", ThreadClassifier.SPARK));
-        assertEquals(true, AffinityManager.demotable("Paper Plugin Re", ThreadClassifier.PAPER_ASYNC));
+        assertEquals(true, AffinityManager.demotable("Timer hack thre", ThreadClassifier.PAPER_ASYNC));
+        assertEquals(false, AffinityManager.demotable("Server console", ThreadClassifier.PAPER_ASYNC)); // runs tab-complete listeners
         assertEquals(false, AffinityManager.demotable("Paper Async Tas", ThreadClassifier.PAPER_ASYNC));
         assertEquals(false, AffinityManager.demotable("Paper Watchdog", ThreadClassifier.PAPER_ASYNC));
         assertEquals(false, AffinityManager.demotable("Server Watchdog", ThreadClassifier.PAPER_ASYNC));
         assertEquals(false, AffinityManager.demotable("Craft Scheduler", ThreadClassifier.PLUGINS_ASYNC));
         assertEquals(false, AffinityManager.demotable("Netty Epoll Ser", ThreadClassifier.NETTY));
-        assertEquals(true, AffinityManager.demotable("pool-3-thread-1", ThreadClassifier.OTHER));
+        // Unknown threads may be idle plugin pools: never demoted (nice cannot be undone and is inherited).
+        assertEquals(false, AffinityManager.demotable("pool-3-thread-1", ThreadClassifier.OTHER));
+        assertEquals(false, AffinityManager.demotable("Log4j2-AsyncApp", ThreadClassifier.OTHER));
+        assertEquals(true, AffinityManager.mustKeepPriority("ForkJoinPool.co", Role.BACKGROUND));
+        assertEquals(true, AffinityManager.mustKeepPriority("pool-3-thread-1", Role.PLUGINS));
+        assertEquals(false, AffinityManager.mustKeepPriority("spark-worker-po", Role.BACKGROUND));
         // Plugins use the common pool implicitly (CompletableFuture.supplyAsync, parallel streams).
         assertEquals(false, AffinityManager.demotable("ForkJoinPool.co", ThreadClassifier.OTHER));
         assertEquals(false, AffinityManager.demotable("ForkJoinPool-1-", ThreadClassifier.OTHER));
