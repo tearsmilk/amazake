@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Level;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
@@ -65,10 +66,16 @@ public final class StageRunner {
         private double sum;
         private double max;
         private int over50;
+        // Amazake entity tick counters at the stage boundaries (main thread), null when they were not held
+        private final @Nullable Map<String, Object> entityStart;
+        private @Nullable Map<String, Object> entityEnd;
+        private final int entityGeneration;
 
-        StageStats(Stage stage) {
+        StageStats(Stage stage, EntityTickBridge entityTicks) {
             this.stage = stage;
             this.startNanos = System.nanoTime();
+            this.entityGeneration = entityTicks.generation();
+            this.entityStart = entityTicks.snapshot();
         }
 
         void record(double ms) {
@@ -83,10 +90,29 @@ public final class StageRunner {
             }
         }
 
-        void end() {
+        void end(EntityTickBridge entityTicks) {
             if (this.endNanos == 0) {
                 this.endNanos = System.nanoTime();
+                if (this.entityStart != null && entityTicks.generation() == this.entityGeneration) {
+                    this.entityEnd = entityTicks.snapshot();
+                }
             }
+        }
+
+        /**
+         * Main thread. The report's {@code entities} object for this stage ({@code topTypes} most expensive
+         * types), or null unless the counters ran for the whole stage (so far, for the current stage) without a
+         * gap: profiler running at the stage start, never released by this plugin until the end.
+         */
+        public @Nullable Map<String, Object> entities(EntityTickBridge entityTicks, int topTypes) {
+            if (this.entityStart == null || (entityTicks.generation() != this.entityGeneration && this.entityEnd == null)) {
+                return null;
+            }
+            Map<String, Object> to = this.entityEnd;
+            if (to == null && this.endNanos == 0) {
+                to = entityTicks.snapshot(); // stage still running
+            }
+            return entityTicks.summarize(this.entityStart, to, topTypes);
         }
 
         public Stage stage() {
@@ -263,11 +289,11 @@ public final class StageRunner {
 
     private void enterStage(Stage target, long now) {
         if (this.currentStats != null) {
-            this.currentStats.end();
+            this.currentStats.end(this.plugin.entityTicks());
         }
         this.stage = target;
         this.stageEntered = true;
-        this.currentStats = new StageStats(target);
+        this.currentStats = new StageStats(target, this.plugin.entityTicks());
         this.stats.add(this.currentStats);
         if (this.config.broadcastStageChanges()) {
             Msg.broadcast("Этап " + target.display() + " — t=" + (now / 20) + " с", NamedTextColor.AQUA, null);
@@ -361,7 +387,7 @@ public final class StageRunner {
             this.task.cancel();
         }
         if (this.currentStats != null) {
-            this.currentStats.end();
+            this.currentStats.end(this.plugin.entityTicks());
         }
         this.plugin.tickMonitor().setSink(null);
         int removed = 0;

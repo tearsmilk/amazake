@@ -40,3 +40,15 @@ tasks.jar {
     archiveVersion.set(project.version.toString())
     archiveClassifier.set("")
 }
+
+// Unit tests of the pure parts (no server needed), e.g. the reflection bridge to Amazake's EntityTickStats.
+dependencies {
+    testImplementation(platform("org.junit:junit-bom:5.11.4"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testImplementation("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
+}
+
+tasks.test {
+    useJUnitPlatform()
+}

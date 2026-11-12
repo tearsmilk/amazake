@@ -20,7 +20,10 @@ final class WorldSnapshots {
     record WorldStats(String name, String environment, int loadedChunks, int entities, int tileEntities, int players) {
     }
 
-    record Snapshot(List<WorldStats> worlds, int players) {
+    /**
+     * @param entityTicks EntityTickStats.snapshot() taken in the same main-thread task, or null when not asked for
+     */
+    record Snapshot(List<WorldStats> worlds, int players, java.util.Map<String, Object> entityTicks) {
         int entities() {
             int sum = 0;
             for (final WorldStats world : this.worlds) {
@@ -43,6 +46,11 @@ final class WorldSnapshots {
 
     /** Counts from the main thread, or null when it did not answer within {@code timeoutMs}. */
     Snapshot take(final boolean withTileEntities, final long timeoutMs) {
+        return this.take(withTileEntities, false, timeoutMs);
+    }
+
+    /** As {@link #take(boolean, long)}; with {@code withEntityTicks} the snapshot also holds the entity tick counters. */
+    Snapshot take(final boolean withTileEntities, final boolean withEntityTicks, final long timeoutMs) {
         if (this.pending != null && !this.pending.isDone()) {
             return null; // the main thread has not even run the previous request
         }
@@ -58,7 +66,7 @@ final class WorldSnapshots {
                     return;
                 }
                 try {
-                    future.complete(read(withTileEntities));
+                    future.complete(read(withTileEntities, withEntityTicks));
                 } catch (final Throwable t) {
                     future.completeExceptionally(t);
                 }
@@ -72,7 +80,7 @@ final class WorldSnapshots {
         }
     }
 
-    private static Snapshot read(final boolean withTileEntities) {
+    private static Snapshot read(final boolean withTileEntities, final boolean withEntityTicks) {
         final List<WorldStats> worlds = new ArrayList<>();
         int players = 0;
         for (final World world : Bukkit.getWorlds()) {
@@ -87,7 +95,8 @@ final class WorldSnapshots {
                 worldPlayers
             ));
         }
-        return new Snapshot(List.copyOf(worlds), players);
+        return new Snapshot(List.copyOf(worlds), players,
+            withEntityTicks ? ink.hoka.amazake.tick.EntityTickStats.snapshot() : null);
     }
 
     /** Names only, for when the main thread never answered at the end. */

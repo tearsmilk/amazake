@@ -1,5 +1,6 @@
 package ink.hoka.amazake.stress.profiler;
 
+import ink.hoka.amazake.stress.EntityTickBridge;
 import ink.hoka.amazake.stress.StageRunner;
 import ink.hoka.amazake.stress.StressPlugin;
 import java.lang.management.GarbageCollectorMXBean;
@@ -14,6 +15,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
@@ -32,9 +34,11 @@ final class ProfilerSession implements Runnable {
     private static final long MAIN_THREAD_WAIT_MS = 1000L;
     /** How long the end of the measurement waits for the main thread (worlds + stress block). */
     private static final long FINAL_WAIT_MS = 5000L;
+    /** Entity types in the top-level {@code entities} (docs/profiler-format.md). */
+    private static final int REPORT_TOP_TYPES = 40;
 
-    /** World list and stress block, read on the main thread at the end. */
-    record FinalData(List<Report.World> worlds, Map<String, Object> stress) {
+    /** World list, stress block and the last entity tick counters, read on the main thread at the end. */
+    record FinalData(List<Report.World> worlds, Map<String, Object> stress, @Nullable Map<String, Object> entityTicks) {
     }
 
     final CommandSender sender;
@@ -54,6 +58,14 @@ final class ProfilerSession implements Runnable {
     private final WorldSnapshots worlds;
     private final List<Report.Sample> samples = new ArrayList<>();
     private final int profileStartTick;
+    // Amazake entity tick counters (EntityTickBridge); all null on servers without them
+    private final EntityTickBridge entityTicks;
+    private final boolean entityHeld;
+    private final AtomicBoolean entityReleased = new AtomicBoolean();
+    /** Taken on the main thread when the session was created. */
+    private final @Nullable Map<String, Object> entityFirst;
+    /** Profiler thread: the latest snapshot a sample got (the next sample is measured from it). */
+    private @Nullable Map<String, Object> entityPrev;
     private long lastGcCount;
     private long lastGcTimeMs;
 
@@ -73,10 +85,36 @@ final class ProfilerSession implements Runnable {
         this.seconds = seconds;
         this.settings = settings;
         this.intervalMs = settings.intervalMs();
-        this.worlds = new WorldSnapshots(plugin);
+        this.entityTicks = plugin.entityTicks();
+        this.worlds = new WorldSnapshots(plugin, this.entityTicks);
         this.start = EnvironmentInfo.Start.capture();
         this.profileStartTick = Bukkit.getCurrentTick();
         this.observeRun();
+        // Acquire last: nothing after it may throw, otherwise the hold would leak and the server would time
+        // every entity tick until restart.
+        final boolean held = this.entityTicks.acquire();
+        Map<String, Object> first = null;
+        try {
+            first = held ? this.entityTicks.snapshot() : null;
+        } catch (final RuntimeException | Error e) {
+            if (held) {
+                this.entityTicks.release();
+            }
+            throw e;
+        }
+        this.entityHeld = held;
+        this.entityFirst = first;
+        this.entityPrev = first;
+    }
+
+    /**
+     * Any thread, idempotent: gives back this session's hold on the entity tick counters. Called when the
+     * measurement is over (after the final main-thread read) and if the session never started.
+     */
+    void releaseEntityTicks() {
+        if (this.entityHeld && this.entityReleased.compareAndSet(false, true)) {
+            this.entityTicks.release();
+        }
     }
 
     long endMillis() {
@@ -120,13 +158,14 @@ final class ProfilerSession implements Runnable {
                 run = last; // started and finished between two samples (cannot really happen, runs are >= 10 s)
             }
         }
-        final WorldSnapshots.Snapshot snapshot = WorldSnapshots.read(true);
+        final WorldSnapshots.Snapshot snapshot = WorldSnapshots.read(true, this.entityReleased.get() ? null : this.entityTicks);
         final List<Report.World> out = new ArrayList<>(snapshot.worlds().size());
         for (final WorldSnapshots.WorldStats world : snapshot.worlds()) {
             out.add(new Report.World(world.name(), world.environment(), world.loadedChunks(), world.entities(),
                 world.tileEntities(), world.players()));
         }
-        return new FinalData(out, StressInfo.build(this.plugin, run, this.seenRunStartTick, this.profileStartTick, this.startMillis));
+        return new FinalData(out, StressInfo.build(this.plugin, run, this.seenRunStartTick, this.profileStartTick, this.startMillis),
+            snapshot.entityTicks());
     }
 
     @Override
@@ -135,11 +174,13 @@ final class ProfilerSession implements Runnable {
         try {
             report = this.measure();
         } catch (final Throwable t) {
+            this.releaseEntityTicks();
             this.plugin.getLogger().log(Level.SEVERE, "Profiler failed", t);
             this.owner.finished(this, null);
             this.owner.messages().error(this.sender, "Замер прервался из-за ошибки: " + t + ". Подробности в консоли.");
             return;
         }
+        this.releaseEntityTicks(); // the final main-thread read is done (build)
         this.owner.finished(this, null); // a new measurement may start while this report is sent
         String result = null;
         try {
@@ -185,6 +226,13 @@ final class ProfilerSession implements Runnable {
         final long heapUsed = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
         final int players = Bukkit.getOnlinePlayers().size();
         final WorldSnapshots.Snapshot snapshot = this.localOnly ? null : this.worlds.take(false, MAIN_THREAD_WAIT_MS, this::observeRun);
+        // Entity tick time since the previous answered sample; null (absent) when the main thread did not answer,
+        // the next sample then covers both intervals.
+        final Map<String, Object> entityCur = snapshot == null ? null : snapshot.entityTicks();
+        final Map<String, Object> entitySample = entityCur == null ? null : this.entityTicks.sample(this.entityPrev, entityCur);
+        if (entityCur != null) {
+            this.entityPrev = entityCur;
+        }
 
         this.samples.add(new Report.Sample(
             tMs,
@@ -199,7 +247,8 @@ final class ProfilerSession implements Runnable {
             (int) Math.max(0L, this.lastGcTimeMs - gcTimeBefore),
             players,
             snapshot == null ? null : snapshot.entities(),
-            snapshot == null ? null : snapshot.loadedChunks()
+            snapshot == null ? null : snapshot.loadedChunks(),
+            entitySample
         ));
     }
 
@@ -256,7 +305,7 @@ final class ProfilerSession implements Runnable {
         stress.put("stageTimeline", List.of());
         stress.put("profileStartedAtTick", this.profileStartTick);
         stress.put("note", "main thread did not answer at the end of the measurement");
-        return new FinalData(names, stress);
+        return new FinalData(names, stress, null);
     }
 
     private Report build(final long durationMs) {
@@ -294,6 +343,12 @@ final class ProfilerSession implements Runnable {
         }
 
         final FinalData end = this.finalData();
+        final Map<String, Object> entitySummary = this.entitySummary(end);
+        List<Report.Sample> samples = List.copyOf(this.samples);
+        if (entitySummary == null) {
+            // samples[].entityTicks is only allowed next to a top-level entities (e.g. the bridge turned off midway)
+            samples = samples.stream().map(ProfilerSession::withoutEntityTicks).toList();
+        }
         return new Report(
             Report.FORMAT,
             Report.VERSION,
@@ -302,12 +357,31 @@ final class ProfilerSession implements Runnable {
             this.intervalMs,
             EnvironmentInfo.server(this.start, end.worlds()),
             EnvironmentInfo.system(this.cpu.perCore(), this.threadCpu.source()),
-            List.copyOf(this.samples),
+            samples,
             threads,
             groupEntries,
             spikes,
+            entitySummary,
             end.stress()
         );
+    }
+
+    private static Report.Sample withoutEntityTicks(final Report.Sample s) {
+        if (s.entityTicks() == null) {
+            return s;
+        }
+        return new Report.Sample(s.t(), s.cores(), s.systemCpu(), s.processCpu(), s.tps(), s.msptAvg(), s.msptMax(),
+            s.heapUsedBytes(), s.gcCount(), s.gcTimeMs(), s.players(), s.entities(), s.loadedChunks(), null);
+    }
+
+    /** The top-level {@code entities}: from the session's first snapshot to the last one taken, or null. */
+    private @Nullable Map<String, Object> entitySummary(final FinalData end) {
+        if (this.entityFirst == null) {
+            return null;
+        }
+        // requestStop reads the final state before the last sample, so take whichever snapshot is newer
+        final Map<String, Object> last = EntityTickBridge.newer(end.entityTicks(), this.entityPrev);
+        return this.entityTicks.summarize(this.entityFirst, last, REPORT_TOP_TYPES);
     }
 
     private static final class GroupTotal {

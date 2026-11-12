@@ -27,12 +27,21 @@ import org.jspecify.annotations.Nullable;
  *   "runOffsetMs": ms from the start of the measurement to the start of the run (negative: run started earlier) | null,
  *   "runTicks": ticks the run completed so far | null,
  *   "finished": bool, "endReason": string | null,
- *   "stageResults": [ { "stage", "ticks", "seconds", "tps", "msptAvg", "msptP95", "msptP99", "msptMax", "lagTicks" } ],
+ *   "stageResults": [ { "stage", "ticks", "seconds", "tps", "msptAvg", "msptP95", "msptP99", "msptMax", "lagTicks",
+ *                       "entities" (optional) } ],
  *   "modules": [ { "id", "failed", "failure", "status" } ]
  * }
  * </pre>
+ *
+ * <p>{@code stageResults[].entities} is the report's {@code entities} object (docs/profiler-format.md) for that
+ * stage only, top 15 types: present on Amazake (server class {@code ink.hoka.amazake.tick.EntityTickStats},
+ * reached through {@link ink.hoka.amazake.stress.EntityTickBridge}) when the profiler measured the whole stage
+ * (for the stage still running: from its start until now). Absent on other servers (Leaf, Paper).
  */
 final class StressInfo {
+
+    /** Entity types per stage result (the top-level {@code entities} keeps 40). */
+    static final int STAGE_TOP_TYPES = 15;
 
     private StressInfo() {
     }
@@ -110,6 +119,10 @@ final class StressInfo {
             s.put("msptP99", round(stats.percentile(99)));
             s.put("msptMax", round(stats.maxMspt()));
             s.put("lagTicks", stats.lagTicks());
+            final Map<String, Object> entities = stats.entities(plugin.entityTicks(), STAGE_TOP_TYPES);
+            if (entities != null) {
+                s.put("entities", entities);
+            }
             results.add(s);
         }
         out.put("stageResults", results);

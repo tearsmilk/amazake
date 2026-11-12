@@ -39,6 +39,11 @@ final class ProfilerSession implements Runnable {
     private long lastGcTimeMs;
     /** System.currentTimeMillis() at t = 0 of the samples. */
     private long startWallMs;
+    /** amazake.yml profiler.entity-breakdown at the start: time entity ticks (the report's "entities"). */
+    private final boolean entityBreakdown = ink.hoka.amazake.AmazakeConfig.profilerEntityBreakdown;
+    /** EntityTickStats snapshots: the session's first one and the last one a sample got. */
+    private Map<String, Object> firstEntityTicks;
+    private Map<String, Object> lastEntityTicks;
 
     ProfilerSession(final CommandSender sender, final int seconds, final int intervalMs) {
         this.sender = sender;
@@ -60,6 +65,7 @@ final class ProfilerSession implements Runnable {
         final Report report;
         try {
             report = this.measure();
+            this.summarizeEntities(report);
         } catch (final Throwable t) {
             Profiler.LOGGER.log(java.util.logging.Level.SEVERE, "Profiler failed", t);
             Profiler.finished(this);
@@ -81,15 +87,30 @@ final class ProfilerSession implements Runnable {
         this.startWallMs = System.currentTimeMillis();
         final long deadlineNs = startNs + TimeUnit.SECONDS.toNanos(this.seconds);
         long lastNs = startNs;
-        while (true) {
-            final long nextNs = Math.min(lastNs + intervalNs, deadlineNs);
-            final long waitNs = nextNs - System.nanoTime();
-            final boolean stopped = waitNs > 0L ? this.stopSignal.await(waitNs, TimeUnit.NANOSECONDS) : this.stopSignal.getCount() == 0L;
-            final long now = System.nanoTime();
-            this.sample(Math.max(1L, now - lastNs), TimeUnit.NANOSECONDS.toMillis(now - startNs));
-            lastNs = now;
-            if (stopped || now >= deadlineNs || Bukkit.isStopping()) {
-                break;
+        if (this.entityBreakdown) {
+            ink.hoka.amazake.tick.EntityTickStats.acquire();
+        }
+        try {
+            if (this.entityBreakdown) {
+                // The baseline the first sample and the report's "entities" are counted from.
+                final WorldSnapshots.Snapshot baseline = this.worlds.take(false, true, MAIN_THREAD_WAIT_MS);
+                this.firstEntityTicks = baseline == null ? null : baseline.entityTicks();
+                this.lastEntityTicks = this.firstEntityTicks;
+            }
+            while (true) {
+                final long nextNs = Math.min(lastNs + intervalNs, deadlineNs);
+                final long waitNs = nextNs - System.nanoTime();
+                final boolean stopped = waitNs > 0L ? this.stopSignal.await(waitNs, TimeUnit.NANOSECONDS) : this.stopSignal.getCount() == 0L;
+                final long now = System.nanoTime();
+                this.sample(Math.max(1L, now - lastNs), TimeUnit.NANOSECONDS.toMillis(now - startNs));
+                lastNs = now;
+                if (stopped || now >= deadlineNs || Bukkit.isStopping()) {
+                    break;
+                }
+            }
+        } finally {
+            if (this.entityBreakdown) {
+                ink.hoka.amazake.tick.EntityTickStats.release();
             }
         }
         // At least 1 ms: a stop right after the start must not produce durationMs 0, which the site rejects (400).
@@ -106,7 +127,16 @@ final class ProfilerSession implements Runnable {
         this.readGc();
         final long heapUsed = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
         final int players = Bukkit.getOnlinePlayers().size();
-        final WorldSnapshots.Snapshot snapshot = this.worlds.take(false, MAIN_THREAD_WAIT_MS);
+        final WorldSnapshots.Snapshot snapshot = this.worlds.take(false, this.entityBreakdown, MAIN_THREAD_WAIT_MS);
+        Map<String, Object> entityTicks = null;
+        if (snapshot != null && snapshot.entityTicks() != null) {
+            if (this.firstEntityTicks == null) {
+                this.firstEntityTicks = snapshot.entityTicks(); // no baseline: count from here
+            } else {
+                entityTicks = ink.hoka.amazake.tick.EntityTickStats.sample(this.lastEntityTicks, snapshot.entityTicks());
+            }
+            this.lastEntityTicks = snapshot.entityTicks();
+        }
 
         this.samples.add(new Report.Sample(
             tMs,
@@ -121,7 +151,8 @@ final class ProfilerSession implements Runnable {
             (int) Math.max(0L, this.lastGcTimeMs - gcTimeBefore),
             players,
             snapshot == null ? null : snapshot.entities(),
-            snapshot == null ? null : snapshot.loadedChunks()
+            snapshot == null ? null : snapshot.loadedChunks(),
+            entityTicks
         ));
     }
 
@@ -182,8 +213,34 @@ final class ProfilerSession implements Runnable {
             threads,
             groupEntries,
             spikes,
-            this.migrations(durationMs)
+            this.migrations(durationMs),
+            this.entityBreakdown ? ink.hoka.amazake.tick.EntityTickStats.summarize(this.firstEntityTicks, this.lastEntityTicks, 40) : null
         );
+    }
+
+    /** One line about the entity tick time: "Сущности: мобы 120.2 мс/тик, остальные 80.1, игроки 0.2 (из 210.4 мс на цикл сущностей)". */
+    @SuppressWarnings("unchecked")
+    private void summarizeEntities(final Report report) {
+        final Map<String, Object> entities = report.entities();
+        if (entities == null) {
+            return;
+        }
+        try {
+            final Map<String, Object> loop = (Map<String, Object>) entities.get("msPerTick");
+            final Map<String, Double> byClass = new LinkedHashMap<>();
+            for (final Map<String, Object> entry : (List<Map<String, Object>>) entities.get("classes")) {
+                byClass.put(String.valueOf(entry.get("class")), ((Number) entry.get("msPerTick")).doubleValue());
+            }
+            Messages.result(this.sender, "Сущности: мобы " + ms(byClass.get("mob")) + " мс/тик, остальные "
+                + ms(byClass.get("other")) + ", игроки " + ms(byClass.get("player")) + " (из "
+                + ms(((Number) loop.get("loop")).doubleValue()) + " мс на цикл сущностей)");
+        } catch (final RuntimeException e) {
+            Profiler.LOGGER.warning("Profiler could not summarize entity ticks: " + e);
+        }
+    }
+
+    private static String ms(final Double value) {
+        return String.format(java.util.Locale.ROOT, "%.1f", value == null ? 0.0 : value);
     }
 
     /** Moves of the tick to a reserve CPU during the measurement; null (left out) when there were none. */

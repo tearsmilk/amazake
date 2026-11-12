@@ -47,6 +47,8 @@ public final class AmazakeConfig {
     public static int profilerMaxSeconds = 600;
     /** Time between two samples, milliseconds (at least 250). */
     public static int profilerIntervalMs = 1000;
+    /** Time every entity tick by type and phase during a measurement (the report's "entities"). */
+    public static boolean profilerEntityBreakdown = true;
 
     /** Core layout: pin thread groups to their own CPUs (Linux, at least 2 CPUs). */
     public static boolean cpuLayoutEnabled = true;
@@ -107,6 +109,10 @@ public final class AmazakeConfig {
         // Upper cap: Bukkit.getTickTimes() only keeps the last ~5 s of ticks (see profiler.TickSampler).
         profilerIntervalMs = Math.min(4000, Math.max(250, integer("profiler.interval-ms", 1000,
             "Интервал между замерами, в миллисекундах (от 250 до 4000).")));
+        profilerEntityBreakdown = bool("profiler.entity-breakdown", true,
+            "Во время замера считать время тика сущностей: мобы, остальные сущности и игроки,",
+            "по типам и по фазам (цели, мозг, поиск пути, движение...). В отчёте это вкладка «Сущности».",
+            "Вне замера ничего не стоит; во время замера добавляет немного к тику при большом числе сущностей.");
 
         cpuLayoutEnabled = bool("cpu.layout.enabled", true,
             "Раскладка ядер: каждое ядро процессора получает свою работу.",

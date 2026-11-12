@@ -369,6 +369,7 @@
       if (!coreRoles.some((r) => r !== 'shared')) coreRoles = null;
     }
     const pools = isObj(server.threadPools) ? server.threadPools : {};
+    const entities = normEntities(raw.entities);
 
     return {
       raw: raw,
@@ -428,9 +429,127 @@
       threads: threads,
       lagSpikes: lagSpikes,
       migrations: migrations,
+      // The optional top-level `entities` object (R.entities stays the per-sample loaded entity count)
+      entityBreakdown: entities,
+      // samples[].entityTicks: ms per tick of the entity loop and of each class; null where a sample has none
+      entityTicks: {
+        loop: samples.map((s) => (isObj(s.entityTicks) ? nonNeg(s.entityTicks.loop) : null)),
+        mob: samples.map((s) => (isObj(s.entityTicks) ? nonNeg(s.entityTicks.mob) : null)),
+        other: samples.map((s) => (isObj(s.entityTicks) ? nonNeg(s.entityTicks.other) : null)),
+        player: samples.map((s) => (isObj(s.entityTicks) ? nonNeg(s.entityTicks.player) : null)),
+      },
+      stress: normStress(raw.stress),
       group: function (id) { return groups.find((g) => g.id === id) || null; },
     };
   }
+
+  function nonNeg(v) { const x = numOrNull(v); return x === null ? null : Math.max(0, x); }
+
+  /** Most entities.types[] entries the viewer reads (the server writes at most 40). */
+  const MAX_ENTITY_TYPES = 200;
+  /** Most distinct phase names the viewer keeps (13 known; unknown ones are shown as they are). */
+  const MAX_PHASES = 40;
+
+  /** {phase: ms} with finite, non-negative numbers only; names are cut to a sane length. */
+  function normPhases(p) {
+    const out = {};
+    if (!isObj(p)) return out;
+    let k = 0;
+    for (const key of Object.keys(p)) {
+      if (++k > MAX_PHASES) break;
+      const v = numOrNull(p[key]);
+      if (v !== null && v > 0) out[cut(key, 64)] = v;
+    }
+    return out;
+  }
+
+  function normEntityRow(e) {
+    const phases = normPhases(e.phases);
+    let ms = nonNeg(e.msPerTick);
+    if (ms === null) ms = sum(Object.keys(phases).map((k) => phases[k]));
+    const inact = numOrNull(e.inactiveShare);
+    return {
+      cls: str(e.class, ''),
+      msPerTick: ms,
+      entitiesPerTick: nonNeg(e.entitiesPerTick),
+      inactiveShare: inact === null ? null : clamp(inact, 0, 1),
+      phases: phases,
+    };
+  }
+
+  /**
+   * The optional top-level `entities` object (docs/profiler-format.md), or null. Classes always come out as
+   * mob, other, player (missing ones as zeros); types sorted by msPerTick; phase names in the report's order
+   * followed by any other name found in classes or types.
+   */
+  function normEntities(raw) {
+    if (!isObj(raw)) return null;
+    const classes = arr(raw.classes).filter(isObj).map(normEntityRow);
+    const byCls = (id) => classes.find((c) => c.cls === id) || { cls: id, msPerTick: 0, entitiesPerTick: 0, inactiveShare: 0, phases: {} };
+    const types = arr(raw.types).filter(isObj).slice(0, MAX_ENTITY_TYPES).map((t) => {
+      const row = normEntityRow(t);
+      row.type = str(t.type, '?') || '?';
+      const us = nonNeg(t.usPerEntity);
+      row.usPerEntity = us !== null ? us : (row.entitiesPerTick > 0 ? row.msPerTick * 1000 / row.entitiesPerTick : null);
+      return row;
+    }).sort((a, b) => b.msPerTick - a.msPerTick);
+    const out3 = ['mob', 'other', 'player'].map(byCls);
+    const phases = [];
+    for (const p of arr(raw.phases)) {
+      if (typeof p === 'string' && p && phases.indexOf(p) < 0 && phases.length < MAX_PHASES) phases.push(cut(p, 64));
+    }
+    for (const row of out3.concat(types)) {
+      for (const p of Object.keys(row.phases)) if (phases.indexOf(p) < 0 && phases.length < MAX_PHASES) phases.push(p);
+    }
+    const m = isObj(raw.msPerTick) ? raw.msPerTick : {};
+    const classSum = sum(out3.map((c) => c.msPerTick));
+    let loop = nonNeg(m.loop);
+    const ear = nonNeg(m.ear), despawn = nonNeg(m.despawn);
+    let overhead = nonNeg(m.overhead);
+    if (loop === null) loop = classSum + (ear || 0) + (despawn || 0) + (overhead || 0);
+    if (overhead === null) overhead = Math.max(0, loop - classSum - (ear || 0) - (despawn || 0));
+    const ticks = numOrNull(raw.ticks);
+    return {
+      ticks: ticks === null ? null : Math.max(0, Math.round(ticks)),
+      phases: phases,
+      loop: loop, ear: ear, despawn: despawn, overhead: overhead,
+      classes: out3,
+      types: types,
+    };
+  }
+
+  /** The AmazakeStress plugin's `stress` object: only what the viewer shows (stage results), or null. */
+  function normStress(raw) {
+    if (!isObj(raw)) return null;
+    const titles = {};
+    for (const s of arr(raw.stageTimeline).filter(isObj)) {
+      const key = str(s.stage, '');
+      if (key && typeof s.title === 'string') titles[key] = cut(s.title, 120);
+    }
+    const stages = arr(raw.stageResults).filter(isObj).slice(0, 64).map((s) => {
+      const key = str(s.stage, '?', 64) || '?';
+      return {
+        key: key,
+        title: Object.prototype.hasOwnProperty.call(titles, key) ? titles[key] : (Object.prototype.hasOwnProperty.call(STAGE_TITLES, key) ? STAGE_TITLES[key] : ''),
+        seconds: nonNeg(s.seconds),
+        ticks: nonNeg(s.ticks),
+        tps: nonNeg(s.tps),
+        msptAvg: nonNeg(s.msptAvg),
+        msptP95: nonNeg(s.msptP95),
+        msptMax: nonNeg(s.msptMax),
+        lagTicks: nonNeg(s.lagTicks),
+        entities: normEntities(s.entities),
+      };
+    });
+    if (!stages.length) return null;
+    return { plugin: str(raw.plugin, ''), stages: stages };
+  }
+
+  /** Russian titles of the AmazakeStress stages, for reports without stageTimeline. */
+  const STAGE_TITLES = {
+    single: 'одиночный модуль', baseline: 'базовая линия (без нагрузки)', mobs: 'мобы', physics: 'физика',
+    redstone: 'редстоун', chunks: 'чанки', packets: 'пакеты + асинхронная нагрузка', max: 'всё на максимуме',
+  };
 
   /** Sample index that contains offset t (first sample whose end is at or after t). */
   function sampleIndexAt(R, t) {
@@ -580,20 +699,25 @@
     const H = o.height || 220;
     const series = o.series.filter((s) => s && s.values);
     const isBar = series.some((s) => s.kind === 'bar');
+    // Lines drawn over stacked areas (not stacked themselves), e.g. the mean tick for reference.
+    const overlays = o.stacked ? (o.lines || []).filter((s) => s && s.values) : [];
 
-    // stacking
+    // stacking; a sample where every stacked series is null is a gap (no area there)
     const lower = [], upper = [];
+    const gap = new Array(n).fill(false);
     if (o.stacked) {
+      for (let i = 0; i < n; i++) gap[i] = series.length > 0 && series.every((s) => s.values[i] === null || s.values[i] === undefined);
       const acc = new Array(n).fill(0);
       for (let k = 0; k < series.length; k++) {
-        lower.push(acc.slice());
+        lower.push(acc.map((v, i) => (gap[i] ? null : v)));
         for (let i = 0; i < n; i++) acc[i] += Math.max(0, series[k].values[i] || 0);
-        upper.push(acc.slice());
+        upper.push(acc.map((v, i) => (gap[i] ? null : v)));
       }
     }
     let dataMax = 0;
     if (o.stacked) dataMax = upper.length ? (maxOf(upper[upper.length - 1]) || 0) : 0;
     else for (const s of series) dataMax = Math.max(dataMax, maxOf(s.values) || 0);
+    for (const s of overlays) dataMax = Math.max(dataMax, maxOf(s.values) || 0);
 
     let yMax;
     if (o.fixedMax) yMax = o.fixedMax;
@@ -655,24 +779,63 @@
     const marks = svg('g');
     root.appendChild(marks);
 
-    if (o.stacked) {
-      for (let k = 0; k < series.length; k++) {
-        const s = series[k];
-        if (n === 1) {
-          const x = X(0);
-          const r = svg('rect', { x: x - 10, width: 20, y: Y(upper[k][0]), height: Math.max(0, Y(lower[k][0]) - Y(upper[k][0])) });
-          r.style.fill = s.color;
-          marks.appendChild(r);
-          continue;
+    // One line series: breaks at nulls, a lone point becomes a dot.
+    const drawLine = (s) => {
+      let d = '', open = false;
+      for (let i = 0; i < n; i++) {
+        const v = s.values[i];
+        if (v === null || v === undefined) { open = false; continue; }
+        const isolated = (i === 0 || s.values[i - 1] === null) && (i === n - 1 || s.values[i + 1] === null);
+        if (isolated) {
+          const c = svg('circle', { cx: X(i), cy: Y(v), r: 3 });
+          c.style.fill = s.color;
+          marks.appendChild(c);
         }
-        let d = '';
-        for (let i = 0; i < n; i++) d += (i ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(upper[k][i]).toFixed(1);
-        for (let i = n - 1; i >= 0; i--) d += 'L' + X(i).toFixed(1) + ',' + Y(lower[k][i]).toFixed(1);
-        const p = svg('path', { d: d + 'Z', 'stroke-width': 1, 'stroke-linejoin': 'round' });
-        p.style.fill = s.color;
-        p.style.stroke = 'var(--surface)';
+        d += (open ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(v).toFixed(1);
+        open = true;
+      }
+      if (d && s.area && n > 1 && s.values.every((v) => v !== null)) {
+        const a = svg('path', { d: d + 'L' + X(n - 1).toFixed(1) + ',' + (mt + ph) + 'L' + X(0).toFixed(1) + ',' + (mt + ph) + 'Z', class: 'area-fill' });
+        a.style.fill = gradientFill(root, s.color, 0.32);
+        marks.insertBefore(a, marks.firstChild);
+      }
+      if (d) {
+        const p = svg('path', { d: d, fill: 'none', 'stroke-width': s.width || 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
+        p.style.stroke = s.color;
+        if (s.dashed) p.setAttribute('stroke-dasharray', '5 4');
         marks.appendChild(p);
       }
+    };
+
+    if (o.stacked) {
+      // Runs of consecutive samples without a gap; each run is its own band.
+      const runs = [];
+      for (let i = 0; i < n; i++) {
+        if (gap[i]) continue;
+        if (runs.length && runs[runs.length - 1][1] === i - 1) runs[runs.length - 1][1] = i;
+        else runs.push([i, i]);
+      }
+      const halfW = n > 1 ? Math.min(10, pw / (n - 1) / 2) : 10;
+      for (let k = 0; k < series.length; k++) {
+        const s = series[k];
+        for (const run of runs) {
+          if (run[0] === run[1]) {
+            const i = run[0];
+            const r = svg('rect', { x: X(i) - halfW, width: halfW * 2, y: Y(upper[k][i]), height: Math.max(0, Y(lower[k][i]) - Y(upper[k][i])) });
+            r.style.fill = s.color;
+            marks.appendChild(r);
+            continue;
+          }
+          let d = '';
+          for (let i = run[0]; i <= run[1]; i++) d += (i > run[0] ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(upper[k][i]).toFixed(1);
+          for (let i = run[1]; i >= run[0]; i--) d += 'L' + X(i).toFixed(1) + ',' + Y(lower[k][i]).toFixed(1);
+          const p = svg('path', { d: d + 'Z', 'stroke-width': 1, 'stroke-linejoin': 'round' });
+          p.style.fill = s.color;
+          p.style.stroke = 'var(--surface)';
+          marks.appendChild(p);
+        }
+      }
+      for (const s of overlays) drawLine(s);
     } else {
       for (const s of series) {
         if (s.kind === 'bar') {
@@ -687,30 +850,7 @@
           }
           continue;
         }
-        let d = '', open = false;
-        for (let i = 0; i < n; i++) {
-          const v = s.values[i];
-          if (v === null) { open = false; continue; }
-          const isolated = (i === 0 || s.values[i - 1] === null) && (i === n - 1 || s.values[i + 1] === null);
-          if (isolated) {
-            const c = svg('circle', { cx: X(i), cy: Y(v), r: 3 });
-            c.style.fill = s.color;
-            marks.appendChild(c);
-          }
-          d += (open ? 'L' : 'M') + X(i).toFixed(1) + ',' + Y(v).toFixed(1);
-          open = true;
-        }
-        if (d && s.area && n > 1 && s.values.every((v) => v !== null)) {
-          const a = svg('path', { d: d + 'L' + X(n - 1).toFixed(1) + ',' + (mt + ph) + 'L' + X(0).toFixed(1) + ',' + (mt + ph) + 'Z', class: 'area-fill' });
-          a.style.fill = gradientFill(root, s.color, 0.32);
-          marks.insertBefore(a, marks.firstChild);
-        }
-        if (d) {
-          const p = svg('path', { d: d, fill: 'none', 'stroke-width': s.width || 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' });
-          p.style.stroke = s.color;
-          if (s.dashed) p.setAttribute('stroke-dasharray', '5 4');
-          marks.appendChild(p);
-        }
+        drawLine(s);
       }
     }
 
@@ -734,7 +874,8 @@
     // hover layer
     const cross = svg('line', { y1: mt, y2: mt + ph, class: 'crosshair', visibility: 'hidden' });
     root.appendChild(cross);
-    const dots = series.filter((s) => s.kind !== 'bar').map((s) => {
+    const dotted = series.filter((s) => s.kind !== 'bar').concat(overlays);
+    const dots = dotted.map((s) => {
       const c = svg('circle', { r: 4, visibility: 'hidden', 'stroke-width': 2 });
       c.style.fill = s.color;
       c.style.stroke = 'var(--surface)';
@@ -753,11 +894,10 @@
       const x = xs[i];
       cross.setAttribute('x1', x); cross.setAttribute('x2', x);
       cross.setAttribute('visibility', 'visible');
-      let k = 0;
-      series.forEach((s, si) => {
-        if (s.kind === 'bar') return;
-        const dot = dots[k++];
-        const v = o.stacked ? upper[si][i] : s.values[i];
+      dotted.forEach((s, k) => {
+        const dot = dots[k];
+        const si = series.indexOf(s);
+        const v = o.stacked && si >= 0 ? upper[si][i] : s.values[i];
         if (v === null || v === undefined) { dot.setAttribute('visibility', 'hidden'); return; }
         dot.setAttribute('cx', x); dot.setAttribute('cy', Y(v));
         dot.setAttribute('visibility', 'visible');
@@ -768,7 +908,8 @@
         rows = series.map((s) => ({ color: s.color, name: s.name, value: s.values[i] === null ? 'нет данных' : valFmt(s.values[i]), line: s.kind !== 'bar' && !o.stacked }));
         if (o.stacked) {
           rows.reverse();
-          if (o.tipTotal !== false) rows.push({ name: 'Всего', value: valFmt(upper.length ? upper[upper.length - 1][i] : 0) });
+          if (o.tipTotal !== false) rows.push({ name: 'Всего', value: gap[i] ? 'нет данных' : valFmt(upper.length ? upper[upper.length - 1][i] : 0) });
+          for (const s of overlays) rows.push({ color: s.color, name: s.name, value: s.values[i] === null ? 'нет данных' : valFmt(s.values[i]), line: true });
         }
       }
       showTip(evt, timeLabel(R, R.t[i]), rows);
@@ -1143,6 +1284,22 @@
     if (msptAvg !== null && msptAvg >= 40) {
       add(msptAvg >= 50 ? 'serious' : 'warning', 'Средняя длительность тика ' + fmtMs(msptAvg) + ' — запас до 50 мс почти исчерпан',
         'Пока тик укладывается в 50 мс, TPS держится на 20, но любой рост нагрузки (новые игроки, фермы, загрузка чанков) сразу превратится в лаги.');
+    }
+
+    // Entities (optional entities object): a large share of the tick goes to the entity loop
+    const E = R.entityBreakdown;
+    if (E && E.loop > 0 && msptAvg !== null && msptAvg >= 25) {
+      const share = E.loop / msptAvg;
+      if (share >= 0.35) {
+        const topCls = E.classes.slice().sort((a, b) => b.msPerTick - a.msPerTick)[0];
+        const topType = E.types[0];
+        add(share >= 0.5 && msptAvg >= 40 ? 'warning' : 'info',
+          'Сущности занимают ' + fmtPct(share) + ' тика: ' + fmtMsTick(E.loop) + ' мс из ' + fmtMs(msptAvg),
+          'Больше всего времени у класса «' + entityClass(topCls.cls).name + '» (' + fmtMsTick(topCls.msPerTick) + ' мс/тик)' +
+          (topType ? ', самый дорогой тип — ' + typeName(topType.type) + ' (' + fmtMsTick(topType.msPerTick) + ' мс/тик, ' + fmtPerTick(topType.entitiesPerTick) + ' за тик)' : '') + '. ' +
+          'Разбор по типам и фазам (цели, поиск пути, толкотня, слияние предметов) — во вкладке «Сущности». Помогают лимиты мобов и предметов, entity-activation-range, ' +
+          'разреженные фермы (толкотня в загонах) и очистка выпавших предметов.');
+      }
     }
 
     // GC
@@ -1760,9 +1917,10 @@
       R.groups.length ? [top, el('div', { class: 'card-foot' }, goThreads)] : el('p', { class: 'empty', text: 'В отчёте нет данных о группах потоков.' }));
 
     const layoutCard = coreLayoutCard(R);
-    if (!layoutCard) return [grid, el('div', { class: 'overview-split' }, [findCard, topCard])];
+    const stages = stressStagesCard(R);
+    if (!layoutCard) return [grid, el('div', { class: 'overview-split' }, [findCard, topCard]), stages];
     topCard.classList.remove('side');
-    return [grid, el('div', { class: 'overview-split' }, [findCard, el('div', { class: 'side side-stack' }, [topCard, layoutCard])])];
+    return [grid, el('div', { class: 'overview-split' }, [findCard, el('div', { class: 'side side-stack' }, [topCard, layoutCard])]), stages];
   }
 
   /** Overview card «Раскладка ядер»: each role, its cores and how busy they were. Null without a layout. */
@@ -2254,6 +2412,296 @@
   }
 
   // ---------------------------------------------------------------------
+  // Tab: Сущности (optional `entities`, samples[].entityTicks)
+  // ---------------------------------------------------------------------
+
+  const PHASE_NAMES = {
+    base: 'прочее',
+    goals: 'цели (goal selector)',
+    brain: 'мозг (behaviors)',
+    sensors: 'сенсоры',
+    pathfind: 'поиск пути',
+    navigation: 'движение по пути',
+    travel: 'физика движения',
+    move: 'move/коллизии',
+    push: 'толкотня',
+    loot: 'подбор предметов',
+    fluids: 'жидкости',
+    merge: 'слияние',
+    inactive: 'неактивные',
+  };
+
+  // Colour follows the phase name; related phases share a hue family (AI, paths, movement).
+  const PHASE_COLORS = {
+    base: 'var(--ph-base)',
+    goals: 'var(--s1)',
+    brain: 'var(--s7)',
+    sensors: 'var(--ph-sensors)',
+    pathfind: 'var(--s2)',
+    navigation: 'var(--ph-nav)',
+    travel: 'var(--s3)',
+    move: 'var(--s6)',
+    push: 'var(--s5)',
+    loot: 'var(--s4)',
+    fluids: 'var(--ph-fluids)',
+    merge: 'var(--ph-merge)',
+    inactive: 'var(--ph-inactive)',
+  };
+
+  const ENTITY_CLASSES = {
+    mob: { name: 'Мобы', short: 'моб', color: 'var(--s1)', desc: 'Всё с ИИ: зомби, жители, животные, пчёлы, пиглины.' },
+    other: { name: 'Остальные сущности', short: 'прочее', color: 'var(--s4)', desc: 'Предметы, опыт, стрелы, вагонетки, стойки для брони, дисплеи.' },
+    player: { name: 'Игроки', short: 'игрок', color: 'var(--s3)', desc: 'Только лёгкий tick(); основная работа игрока идёт вместе с сетью, вне цикла.' },
+  };
+
+  function phaseName(p) { return Object.prototype.hasOwnProperty.call(PHASE_NAMES, p) ? PHASE_NAMES[p] : p; }
+  function phaseColor(p) { return Object.prototype.hasOwnProperty.call(PHASE_COLORS, p) ? PHASE_COLORS[p] : REST_COLOR; }
+  function entityClass(c) { return Object.prototype.hasOwnProperty.call(ENTITY_CLASSES, c) ? ENTITY_CLASSES[c] : { name: c || '?', short: c || '?', color: REST_COLOR, desc: '' }; }
+  function typeName(t) { return t.indexOf('minecraft:') === 0 ? t.slice(10) : t; }
+
+  /** Milliseconds per tick: two decimals below 10 ms (entity times are often fractions of a millisecond). */
+  function fmtMsTick(v) {
+    if (v === null || v === undefined || !isFinite(v)) return '—';
+    if (v > 0 && v < 0.01) return '<' + NBSP + '0,01';
+    return fmtNum(v, v < 10 ? 2 : v < 100 ? 1 : 0);
+  }
+  function fmtPerTick(v) { return v === null || v === undefined ? '—' : fmtNum(v, v > 0 && v < 10 ? 1 : 0); }
+  function fmtUs(v) { return v === null || v === undefined ? '—' : fmtNum(v, v < 10 ? 1 : 0); }
+
+  /** A row's phases as [{phase, ms}] in display order, zeros left out. */
+  function phaseList(E, phases) {
+    return E.phases.filter((p) => phases[p] > 0).map((p) => ({ phase: p, ms: phases[p] }));
+  }
+
+  function phaseTipRows(list, total) {
+    return list.slice().sort((a, b) => b.ms - a.ms).map((x) => ({
+      color: phaseColor(x.phase), name: phaseName(x.phase),
+      value: fmtMsTick(x.ms) + NBSP + 'мс' + (total > 0 ? ' · ' + fmtPct(x.ms / total) : ''),
+    }));
+  }
+
+  /** Horizontal stacked bar of parts [{color, value}], with a tooltip of all parts. */
+  function stackBar(parts, cls, tipTitle, tipRows) {
+    const total = sum(parts.map((p) => p.value));
+    const bar = el('div', { class: 'stack-bar' + (cls ? ' ' + cls : ''), role: 'img', 'aria-label': tipTitle });
+    for (const p of parts) {
+      if (!(p.value > 0) || !(total > 0)) continue;
+      const s = el('span');
+      s.style.flexGrow = String(p.value / total);
+      s.style.background = p.color;
+      bar.appendChild(s);
+    }
+    const onMove = (evt) => showTip(evt, tipTitle, tipRows());
+    bar.addEventListener('pointermove', onMove);
+    bar.addEventListener('pointerdown', onMove);
+    bar.addEventListener('pointerleave', hideTip);
+    return bar;
+  }
+
+  function phaseBar(E, row, title, cls) {
+    const list = phaseList(E, row.phases);
+    return stackBar(list.map((x) => ({ color: phaseColor(x.phase), value: x.ms })), cls, title, () => phaseTipRows(list, row.msPerTick));
+  }
+
+  /** The parts of the entity loop: three classes, activation range, despawn checks, the rest. */
+  function loopParts(E) {
+    const parts = E.classes.map((c) => ({ id: c.cls, name: entityClass(c.cls).name, color: entityClass(c.cls).color, value: c.msPerTick }));
+    parts.push({ id: 'ear', name: 'Activation range (EAR)', color: 'var(--ph-ear)', value: E.ear || 0 });
+    parts.push({ id: 'despawn', name: 'Проверки деспавна', color: 'var(--ph-despawn)', value: E.despawn || 0 });
+    parts.push({ id: 'overhead', name: 'Обход и остальное', color: 'var(--ph-inactive)', value: E.overhead || 0 });
+    return parts;
+  }
+
+  function entityChips(R, E) {
+    const msptAvg = mean(R.msptAvg);
+    const share = msptAvg > 0 ? E.loop / msptAvg : null;
+    const perTick = sum(E.classes.map((c) => c.entitiesPerTick || 0));
+    const out = [
+      chip('Цикл сущностей', fmtMsTick(E.loop), { unit: 'мс/тик', sub: share === null ? 'все миры' : fmtPct(share) + ' среднего тика' }),
+    ];
+    for (const c of E.classes) {
+      out.push(chip(entityClass(c.cls).name, fmtMsTick(c.msPerTick), { unit: 'мс/тик', sub: E.loop > 0 ? fmtPct(c.msPerTick / E.loop) + ' цикла' : null }));
+    }
+    out.push(chip('Сущностей за тик', fmtPerTick(perTick), { sub: E.ticks ? 'за ' + fmtNum(E.ticks) + ' ' + plural(E.ticks, ['тик', 'тика', 'тиков']) : null }));
+    return el('div', { class: 'stat-chips' }, out);
+  }
+
+  function entityLoopCard(E) {
+    const parts = loopParts(E);
+    const rows = () => parts.filter((p) => p.value > 0).map((p) => ({ color: p.color, name: p.name, value: fmtMsTick(p.value) + NBSP + 'мс · ' + fmtPct(E.loop > 0 ? p.value / E.loop : 0) }));
+    const items = el('ul', { class: 'loop-legend' });
+    for (const p of parts) {
+      const sw = el('span', { class: 'swatch' });
+      sw.style.background = p.color;
+      items.appendChild(el('li', null, [
+        sw,
+        el('span', { class: 'll-name', text: p.name }),
+        el('span', { class: 'll-val mono', text: fmtMsTick(p.value) + NBSP + 'мс' }),
+        el('span', { class: 'll-pct mono', text: E.loop > 0 ? fmtPct(p.value / E.loop) : '—' }),
+      ]));
+    }
+    return card({
+      title: 'Из чего состоит цикл сущностей',
+      desc: 'Секции «entities» всех миров за тик: ' + fmtMsTick(E.loop) + NBSP + 'мс. Сюда входят тики сущностей трёх классов, ' +
+        'проверка activation range (EAR, раз на мир за тик), проверки деспавна и остальное: обход списка, задачи чанков между сущностями, битва с драконом.',
+    }, [stackBar(parts, 'loop-bar', 'Цикл сущностей · ' + fmtMsTick(E.loop) + NBSP + 'мс/тик', rows), items]);
+  }
+
+  function entityTimeCard(R) {
+    const et = R.entityTicks;
+    const has = et.mob.some((v) => v !== null) || et.other.some((v) => v !== null) || et.player.some((v) => v !== null);
+    const desc = 'Время тиков сущностей по классам в каждом интервале, мс на тик. Линия — средняя длительность всего тика (MSPT) для сравнения.';
+    if (!has) {
+      return card({ title: 'Сущности по времени', desc: desc }, el('p', { class: 'empty', text: 'В замерах нет времени сущностей по интервалам (samples[].entityTicks).' }));
+    }
+    const gaps = R.msptAvg.filter((_, i) => et.mob[i] === null && et.other[i] === null && et.player[i] === null).length;
+    const series = ['mob', 'other', 'player'].map((c) => ({ name: entityClass(c).name, values: et[c], color: entityClass(c).color }));
+    const mspt = { name: 'Средний тик (MSPT)', values: R.msptAvg, color: 'var(--ref)', width: 1.5 };
+    return card({ title: 'Сущности по времени', desc: desc }, [
+      legend(series.map((s) => ({ name: s.name, color: s.color })).concat([{ name: mspt.name, color: mspt.color, line: true }])),
+      tsChart(R, () => ({
+        stacked: true,
+        height: 240,
+        series: series,
+        lines: [mspt],
+        refs: [{ y: 50, label: '50 мс', strong: true }],
+        yFmt: (v) => fmtNum(v, v % 1 ? 1 : 0),
+        valFmt: (v) => fmtMsTick(v) + NBSP + 'мс',
+        tipRows: (i) => {
+          const rows = series.slice().reverse().map((s) => ({ color: s.color, name: s.name, value: s.values[i] === null ? 'нет данных' : fmtMsTick(s.values[i]) + NBSP + 'мс' }));
+          rows.push({ name: 'Весь цикл сущностей', value: et.loop[i] === null ? 'нет данных' : fmtMsTick(et.loop[i]) + NBSP + 'мс' });
+          rows.push({ color: mspt.color, line: true, name: mspt.name, value: R.msptAvg[i] === null ? 'нет данных' : fmtMsTick(R.msptAvg[i]) + NBSP + 'мс' });
+          return rows;
+        },
+        ariaLabel: 'Время сущностей по классам',
+      })),
+      gaps ? el('p', { class: 'chart-note', text: 'Пропуски — интервалы, в которые главный поток не ответил вовремя: их время вошло в следующий замер.' }) : null,
+    ]);
+  }
+
+  function entityClassCard(E, c) {
+    const info = entityClass(c.cls);
+    const list = phaseList(E, c.phases).sort((a, b) => b.ms - a.ms);
+    const sw = el('span', { class: 'swatch' });
+    sw.style.background = info.color;
+    const us = c.entitiesPerTick > 0 ? c.msPerTick * 1000 / c.entitiesPerTick : null;
+    const phases = el('ul', { class: 'phase-list' });
+    for (const x of list) {
+      const psw = el('span', { class: 'swatch' });
+      psw.style.background = phaseColor(x.phase);
+      phases.appendChild(el('li', null, [
+        psw,
+        el('span', { class: 'pl-name', text: phaseName(x.phase), title: x.phase }),
+        el('span', { class: 'pl-val mono', text: fmtMsTick(x.ms) }),
+        el('span', { class: 'pl-pct mono', text: c.msPerTick > 0 ? fmtPct(x.ms / c.msPerTick) : '—' }),
+      ]));
+    }
+    return el('section', { class: 'card ent-class' }, [
+      el('div', { class: 'ec-head' }, [
+        el('h2', null, [sw, el('span', { text: info.name })]),
+        el('div', { class: 'ec-value' }, [el('span', { class: 'ec-num', text: fmtMsTick(c.msPerTick) }), el('span', { class: 'ec-unit', text: 'мс/тик' })]),
+      ]),
+      el('p', { class: 'card-desc', text: info.desc + (E.loop > 0 ? ' ' + fmtPct(c.msPerTick / E.loop) + ' цикла сущностей.' : '') }),
+      el('dl', { class: 'ec-stats' }, [
+        el('div', null, [el('dt', { text: 'сущностей за тик' }), el('dd', { class: 'mono', text: fmtPerTick(c.entitiesPerTick) })]),
+        el('div', null, [el('dt', { text: 'мкс на сущность' }), el('dd', { class: 'mono', text: fmtUs(us) })]),
+        el('div', null, [el('dt', { text: 'неактивных' }), el('dd', { class: 'mono', text: fmtPct(c.inactiveShare) })]),
+      ]),
+      list.length ? phaseBar(E, c, info.name + ' · ' + fmtMsTick(c.msPerTick) + NBSP + 'мс/тик', 'phase-bar') : null,
+      list.length ? phases : el('p', { class: 'empty', text: c.entitiesPerTick > 0 ? 'Фазы не переданы.' : 'Таких сущностей не было.' }),
+    ]);
+  }
+
+  const ENTITY_TYPES_FIRST = 15;
+
+  function entityTypesCard(E) {
+    if (!E.types.length) return card({ title: 'Самые дорогие типы' }, el('p', { class: 'empty', text: 'Список типов не передан.' }));
+    const columns = [
+      { label: 'Тип', cls: 'name', render: (t) => [
+        el('span', { class: 'mono type-name', text: typeName(t.type), title: t.type }),
+        el('span', { class: 'td-sub', text: entityClass(t.cls).short }),
+        // Phones: the phase bar goes under the name instead of its own column.
+        el('span', { class: 'type-bar' }, phaseBar(E, t, typeName(t.type) + ' · ' + fmtMsTick(t.msPerTick) + NBSP + 'мс/тик', 'mini')),
+      ] },
+      { label: 'Класс', cls: 'opt nowrap', render: (t) => {
+        const c = entityClass(t.cls);
+        const p = el('span', { class: 'class-chip', text: c.short });
+        p.style.setProperty('--role', c.color);
+        return p;
+      } },
+      { label: 'мс/тик', cls: 'num', render: (t) => fmtMsTick(t.msPerTick) },
+      { label: 'Сущностей за тик', short: 'Сущн.', cls: 'num', render: (t) => fmtPerTick(t.entitiesPerTick) },
+      { label: 'мкс на сущность', short: 'мкс', cls: 'num', render: (t) => fmtUs(t.usPerEntity) },
+      { label: 'Неактивных', cls: 'num opt', render: (t) => fmtPct(t.inactiveShare) },
+      { label: 'Фазы', cls: 'phase-cell opt', render: (t) => phaseBar(E, t, typeName(t.type) + ' · ' + fmtMsTick(t.msPerTick) + NBSP + 'мс/тик', 'mini') },
+    ];
+    const t = table(columns, E.types.slice(0, ENTITY_TYPES_FIRST));
+    t.wrap.classList.add('types-table');
+    const body = [t.wrap];
+    if (E.types.length > ENTITY_TYPES_FIRST) {
+      const foot = el('div', { class: 'card-foot' });
+      foot.appendChild(moreButton('Показать все ' + E.types.length, () => { fillBody(t.tbody, columns, E.types); foot.remove(); }));
+      body.push(foot);
+    }
+    return card({
+      title: 'Самые дорогие типы',
+      desc: 'Типы сущностей по времени за тик, самые дорогие сверху. «мкс на сущность» — цена одного тика одной сущности: высокая цена у немногих сущностей ' +
+        'и низкая у тысяч дают одинаковое время. Наведите на полосу фаз, чтобы увидеть, на что ушло время.',
+    }, body);
+  }
+
+  function tabEntities(R) {
+    const E = R.entityBreakdown;
+    if (!E) return noticeEl('info', 'В отчёте нет данных о сущностях', 'Их собирает только сервер Amazake (amazake.yml, profiler.entity-breakdown).');
+    const legendEl = el('ul', { class: 'legend phase-legend' });
+    for (const p of E.phases) {
+      const used = E.classes.some((c) => c.phases[p] > 0);
+      if (!used) continue;
+      const sw = el('span', { class: 'swatch' });
+      sw.style.background = phaseColor(p);
+      legendEl.appendChild(el('li', { title: p }, [sw, phaseName(p)]));
+    }
+    return [
+      entityChips(R, E),
+      entityTimeCard(R),
+      entityLoopCard(E),
+      el('div', { class: 'ent-classes' }, E.classes.map((c) => entityClassCard(E, c))),
+      legendEl.childNodes.length ? card({ cls: 'phase-legend-card', title: 'Фазы', desc: 'Время каждой фазы — собственное: вложенная фаза (поиск пути внутри целей, move внутри физики движения) не считается дважды. «Прочее» — всё остальное в тике сущности.' }, legendEl) : null,
+      entityTypesCard(E),
+    ].filter(Boolean);
+  }
+
+  /** Overview card «Этапы стресс-теста» (AmazakeStress `stress.stageResults[]`); null without stages. */
+  function stressStagesCard(R) {
+    const S = R.stress;
+    if (!S) return null;
+    const withEnt = S.stages.some((s) => s.entities);
+    const entMs = (s, cls) => {
+      if (!s.entities) return el('span', { class: 'muted', title: 'Нет данных о сущностях за этот этап', text: '—' });
+      const c = s.entities.classes.find((x) => x.cls === cls);
+      return fmtMsTick(c ? c.msPerTick : null);
+    };
+    const columns = [
+      { label: 'Этап', cls: 'name', render: (s) => [el('span', { class: 'mono', text: s.key }), s.title ? el('span', { class: 'stage-title', text: s.title }) : null] },
+      { label: 'Длительность', short: 'Длит.', cls: 'num opt', render: (s) => (s.seconds === null ? '—' : fmtDuration(s.seconds * 1000)) },
+      { label: 'TPS', cls: 'num', render: (s) => fmtNum(s.tps, 2) },
+      { label: 'MSPT ср.', short: 'MSPT', cls: 'num', render: (s) => fmtNum(s.msptAvg, 1) },
+      { label: 'p95', cls: 'num opt', render: (s) => fmtNum(s.msptP95, 1) },
+    ];
+    if (withEnt) {
+      columns.push({ label: 'Мобы, мс/тик', short: 'Мобы', cls: 'num', render: (s) => entMs(s, 'mob') });
+      columns.push({ label: 'Остальные, мс/тик', short: 'Прочее', cls: 'num', render: (s) => entMs(s, 'other') });
+    }
+    const t = table(columns, S.stages);
+    t.wrap.classList.add('stages-table');
+    return card({
+      title: 'Этапы стресс-теста',
+      desc: 'Итоги этапов ' + (S.plugin || 'AmazakeStress') + ': TPS и длительность тика (среднее и 95-й перцентиль, мс)' +
+        (withEnt ? '; время мобов и остальных сущностей — если профайлер измерял этап с самого начала, иначе прочерк.' : '.'),
+    }, t.wrap);
+  }
+
+  // ---------------------------------------------------------------------
   // Tab: Память
   // ---------------------------------------------------------------------
 
@@ -2390,6 +2838,8 @@
     { id: 'cores', label: 'Ядра', render: tabCores },
     { id: 'threads', label: 'Потоки', render: tabThreads },
     { id: 'ticks', label: 'Тики', render: tabTicks },
+    // Only for reports with the optional `entities` object (Amazake's entity tick breakdown).
+    { id: 'entities', label: 'Сущности', render: tabEntities, when: (R) => !!R.entityBreakdown },
     { id: 'memory', label: 'Память', render: tabMemory },
     { id: 'server', label: 'Сервер', render: tabServer },
   ];
@@ -2398,6 +2848,11 @@
 
   /** The loaded report: {key, R, raw, rawText, fileName, shareUrl, findings, tab, panel}. */
   let current = null;
+
+  /** Tabs of the loaded report (a tab with `when` only when the report has its data). */
+  function visibleTabs() {
+    return TABS.filter((t) => !t.when || (current && t.when(current.R)));
+  }
 
   function tabFromHash() {
     const h = (location.hash || '').slice(1);
@@ -2500,20 +2955,21 @@
 
     const inner = tabsBar.firstElementChild;
     inner.textContent = '';
-    for (const t of TABS) {
+    const tabs = visibleTabs();
+    for (const t of tabs) {
       const b = el('button', { class: 'tab', type: 'button', role: 'tab', id: 'tab-' + t.id, 'aria-controls': 'panel', 'aria-selected': 'false', tabindex: '-1', text: t.label });
       b.addEventListener('click', () => setTab(t.id, true));
       b.addEventListener('keydown', (e) => {
-        const i = TABS.indexOf(t);
+        const i = tabs.indexOf(t);
         let j = -1;
-        if (e.key === 'ArrowRight') j = (i + 1) % TABS.length;
-        else if (e.key === 'ArrowLeft') j = (i - 1 + TABS.length) % TABS.length;
+        if (e.key === 'ArrowRight') j = (i + 1) % tabs.length;
+        else if (e.key === 'ArrowLeft') j = (i - 1 + tabs.length) % tabs.length;
         else if (e.key === 'Home') j = 0;
-        else if (e.key === 'End') j = TABS.length - 1;
+        else if (e.key === 'End') j = tabs.length - 1;
         if (j < 0) return;
         e.preventDefault();
-        setTab(TABS[j].id, true);
-        document.getElementById('tab-' + TABS[j].id).focus();
+        setTab(tabs[j].id, true);
+        document.getElementById('tab-' + tabs[j].id).focus();
       });
       inner.appendChild(b);
     }
@@ -2525,13 +2981,14 @@
 
   function setTab(id, updateUrl) {
     if (!current) return;
-    if (!TABS.some((t) => t.id === id)) id = 'overview';
+    const tabs = visibleTabs();
+    if (!tabs.some((t) => t.id === id)) id = 'overview';
     const same = current.tab === id && current.panel.childNodes.length;
     current.tab = id;
     if (updateUrl && location.hash !== '#' + id) {
       history.replaceState(null, '', location.pathname + location.search + '#' + id);
     }
-    for (const t of TABS) {
+    for (const t of tabs) {
       const b = document.getElementById('tab-' + t.id);
       if (!b) continue;
       const on = t.id === id;
@@ -2542,13 +2999,13 @@
       }
     }
     if (same) return;
-    const tab = TABS.find((t) => t.id === id);
+    const tab = tabs.find((t) => t.id === id);
     charts = [];
     hideTip();
     const panel = current.panel;
     panel.setAttribute('aria-labelledby', 'tab-' + id);
     panel.textContent = '';
-    for (const node of safeSection(tab.render, current.R)) panel.appendChild(node);
+    for (const node of safeSection(tab.render, current.R)) if (node) panel.appendChild(node);
     drawAllCharts(true);
     if (window.scrollY > 0) window.scrollTo(0, 0);
   }

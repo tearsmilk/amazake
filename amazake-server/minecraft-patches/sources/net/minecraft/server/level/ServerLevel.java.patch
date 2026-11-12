@@ -1,0 +1,84 @@
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -825,20 +_,25 @@
+ 
+         if (this.emptyTime < 300) {
+             profilerFiller.push("entities");
++            final long amazake$loop = ink.hoka.amazake.tick.EntityTickStats.loopStart(); // Amazake - entity tick breakdown
+             if (this.dragonFight != null && runsNormally) {
+                 profilerFiller.push("dragonFight");
+                 this.dragonFight.tick();
+                 profilerFiller.pop();
+             }
+ 
++            final long amazake$ear = ink.hoka.amazake.tick.EntityTickStats.loopStart(); // Amazake - entity tick breakdown
+             io.papermc.paper.entity.activation.ActivationRange.activateEntities(this); // Paper - EAR
++            ink.hoka.amazake.tick.EntityTickStats.loopEnd(ink.hoka.amazake.tick.EntityTickStats.EAR, amazake$ear); // Amazake - entity tick breakdown
+             this.entityTickList
+                 .forEach(
+                     entity -> {
+                         if (!entity.isRemoved()) {
+                             if (!tickRateManager.isEntityFrozen(entity)) {
+                                 profilerFiller.push("checkDespawn");
++                                final long amazake$despawn = ink.hoka.amazake.tick.EntityTickStats.loopStart(); // Amazake - entity tick breakdown
+                                 entity.checkDespawn();
++                                ink.hoka.amazake.tick.EntityTickStats.loopEnd(ink.hoka.amazake.tick.EntityTickStats.DESPAWN, amazake$despawn); // Amazake - entity tick breakdown
+                                 profilerFiller.pop();
+                                 if (true) { // Paper - rewrite chunk system
+                                     Entity vehicle = entity.getVehicle();
+@@ -858,6 +_,7 @@
+                         }
+                     }
+                 );
++            ink.hoka.amazake.tick.EntityTickStats.loopEnd(ink.hoka.amazake.tick.EntityTickStats.LOOP, amazake$loop); // Amazake - entity tick breakdown
+             profilerFiller.popPush("blockEntities");
+             this.tickBlockEntities();
+             profilerFiller.pop();
+@@ -1350,10 +_,16 @@
+         profilerFiller.push(() -> BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString());
+         profilerFiller.incrementCounter("tickNonPassenger");
+         final boolean isActive = io.papermc.paper.entity.activation.ActivationRange.checkIfActive(entity); // Paper - EAR 2
++        ink.hoka.amazake.tick.EntityTickStats.beginEntity(entity); // Amazake - entity tick breakdown
+         if (isActive) { // Paper - EAR 2
+         entity.tick();
+         entity.postTick(); // CraftBukkit
+-        } else {entity.inactiveTick();} // Paper - EAR 2
++        } else {
++            final int amazake$p = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.INACTIVE); // Amazake - entity tick breakdown
++            entity.inactiveTick();
++            ink.hoka.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
++        } // Paper - EAR 2
++        ink.hoka.amazake.tick.EntityTickStats.endEntity(isActive); // Amazake - entity tick breakdown
+         profilerFiller.pop();
+ 
+         for (Entity entity1 : entity.getPassengers()) {
+@@ -1361,6 +_,7 @@
+         }
+         // Paper start - log detailed entity tick information
+         } finally {
++            ink.hoka.amazake.tick.EntityTickStats.abortEntity(); // Amazake - entity tick breakdown: a tick that threw skipped endEntity
+             if (currentlyTickingEntity.get() == entity) {
+                 currentlyTickingEntity.lazySet(null);
+             }
+@@ -1378,17 +_,21 @@
+             ProfilerFiller profilerFiller = Profiler.get();
+             profilerFiller.push(() -> BuiltInRegistries.ENTITY_TYPE.getKey(passengerEntity.getType()).toString());
+             profilerFiller.incrementCounter("tickPassenger");
++            ink.hoka.amazake.tick.EntityTickStats.beginEntity(passengerEntity); // Amazake - entity tick breakdown
+             // Paper start - EAR 2
+             if (isActive) {
+             passengerEntity.rideTick();
+             passengerEntity.postTick(); // CraftBukkit
+             } else {
+                 passengerEntity.setDeltaMovement(Vec3.ZERO);
++                final int amazake$p = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.INACTIVE); // Amazake - entity tick breakdown
+                 passengerEntity.inactiveTick();
++                ink.hoka.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
+                 // copied from inside of if (isPassenger()) of passengerTick, but that ifPassenger is unnecessary
+                 ridingEntity.positionRider(passengerEntity);
+             }
+             // Paper end - EAR 2
++            ink.hoka.amazake.tick.EntityTickStats.endEntity(isActive); // Amazake - entity tick breakdown
+             profilerFiller.pop();
+ 
+             for (Entity entity : passengerEntity.getPassengers()) {

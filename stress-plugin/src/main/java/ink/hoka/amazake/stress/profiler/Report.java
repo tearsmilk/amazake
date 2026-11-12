@@ -9,6 +9,8 @@ import java.util.Map;
  *
  * <p>Ported from Amazake's profiler; the only addition is the top-level {@code stress} object (scenario,
  * stage timeline, per-stage results), which readers of format version 1 ignore and the site stores as is.
+ * {@code entities} (top level, optional) and {@code samples[].entityTicks} (optional) come from Amazake's entity
+ * tick counters through {@link ink.hoka.amazake.stress.EntityTickBridge}; null (absent) on other servers.
  */
 record Report(
     String format,
@@ -22,6 +24,7 @@ record Report(
     List<ThreadEntry> threads,
     List<GroupEntry> groups,
     List<LagSpike> lagSpikes,
+    Map<String, Object> entities,
     Map<String, Object> stress
 ) {
 
@@ -77,7 +80,8 @@ record Report(
         int gcTimeMs,
         int players,
         Integer entities,
-        Integer loadedChunks
+        Integer loadedChunks,
+        Map<String, Object> entityTicks
     ) {
     }
 

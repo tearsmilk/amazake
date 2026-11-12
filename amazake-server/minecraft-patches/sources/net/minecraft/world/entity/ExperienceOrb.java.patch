@@ -1,0 +1,17 @@
+--- a/net/minecraft/world/entity/ExperienceOrb.java
++++ b/net/minecraft/world/entity/ExperienceOrb.java
+@@ -241,12 +_,14 @@
+     }
+ 
+     private void scanForMerges() {
++        final int amazake$p = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.MERGE); // Amazake - entity tick breakdown
+         if (this.level() instanceof ServerLevel) {
+             for (ExperienceOrb experienceOrb : this.level()
+                 .getEntities(EntityTypeTest.forClass(ExperienceOrb.class), this.getBoundingBox().inflate(0.5), this::canMerge)) {
+                 this.merge(experienceOrb);
+             }
+         }
++        ink.hoka.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
+     }
+ 
+     public static void award(ServerLevel level, Vec3 pos, int amount) {

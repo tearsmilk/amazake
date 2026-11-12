@@ -1,6 +1,7 @@
 package ink.hoka.amazake.profiler;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * The report of docs/profiler-format.md (version 1), shaped so Gson writes it field for field.
@@ -18,7 +19,8 @@ record Report(
     List<ThreadEntry> threads,
     List<GroupEntry> groups,
     List<LagSpike> lagSpikes,
-    List<Migration> migrations
+    List<Migration> migrations,
+    Map<String, Object> entities
 ) {
 
     static final String FORMAT = "amazake-profile";
@@ -74,7 +76,8 @@ record Report(
         int gcTimeMs,
         int players,
         Integer entities,
-        Integer loadedChunks
+        Integer loadedChunks,
+        Map<String, Object> entityTicks
     ) {
     }
 

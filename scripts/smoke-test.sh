@@ -139,6 +139,16 @@ if sysinfo["perCore"] and cpus >= 2:
         assert role == "shared" or set(role.split("+")) <= known, "unknown core role %r" % role
     assert roles.count("tick") == 1, "one tick core expected: %s" % roles
     assert all(len(s["cores"]) == len(roles) for s in r["samples"] if s.get("cores")), "samples[].cores length"
+e = r.get("entities")
+assert isinstance(e, dict), "no entities block (entity tick breakdown)"
+assert [c["class"] for c in e["classes"]] == ["mob", "other", "player"], e["classes"]
+assert e["ticks"] > 0, e  # no player: worlds may skip entities after 15 s idle, so loop can be 0
+total = sum(c["msPerTick"] for c in e["classes"]) + e["msPerTick"]["ear"] + e["msPerTick"]["despawn"] + e["msPerTick"]["overhead"]
+assert abs(total - e["msPerTick"]["loop"]) <= 0.02 + 0.01 * e["msPerTick"]["loop"], "entities do not add up: %s vs loop %s" % (total, e["msPerTick"]["loop"])
+assert any(isinstance(s.get("entityTicks"), dict) for s in r["samples"]), "no samples[].entityTicks"
+assert all(isinstance(s.get("entities", 0), int) for s in r["samples"]), "samples[].entities must stay the entity count"
+print("entities: loop %.3f ms/tick, %s, top types %s" % (e["msPerTick"]["loop"],
+    ", ".join("%s %.3f" % (c["class"], c["msPerTick"]) for c in e["classes"]), [t["type"] for t in e["types"][:5]]))
 print("report: %d samples, %d threads, groups %s, %d cores, per-core %s, core roles %s" % (
     len(r["samples"]), len(r["threads"]), sorted(groups), sysinfo["logicalCores"], sysinfo["perCore"], sysinfo.get("coreRoles")))
 EOF
@@ -188,6 +198,14 @@ modules = {m["id"]: m for m in s["modules"]}
 assert sorted(modules) == ["async", "chunks", "mobs", "packets", "physics", "redstone"], sorted(modules)
 failed = [m["id"] + ": " + str(m.get("failure")) for m in modules.values() if m["failed"]]
 assert not failed, failed
+e = r.get("entities")
+assert isinstance(e, dict), "the stress report has no entities block on Amazake"
+mobs = next(c for c in e["classes"] if c["class"] == "mob")
+assert mobs["msPerTick"] > 0 and mobs["entitiesPerTick"] > 0, mobs
+staged = {x["stage"]: x.get("entities") for x in s["stageResults"]}
+assert isinstance(staged.get("mobs"), dict), "no stageResults[mobs].entities"
+assert next(c for c in staged["mobs"]["classes"] if c["class"] == "mob")["msPerTick"] > 0, staged["mobs"]["classes"]
+print("stress entities: " + ", ".join("%s=%s" % (k, None if v is None else round(next(c for c in v["classes"] if c["class"] == "mob")["msPerTick"], 3)) for k, v in staged.items()))
 print("stress report: %d samples, stages %s" % (len(r["samples"]), " ".join(
     "%s=%.1fms" % (x["stage"], x["msptAvg"]) for x in s["stageResults"])))
 for m in s["modules"]:

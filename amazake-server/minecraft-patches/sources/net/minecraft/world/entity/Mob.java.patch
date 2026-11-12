@@ -1,0 +1,44 @@
+--- a/net/minecraft/world/entity/Mob.java
++++ b/net/minecraft/world/entity/Mob.java
+@@ -526,6 +_,7 @@
+ 
+         ProfilerFiller profilerFiller = Profiler.get();
+         profilerFiller.push("looting");
++        final int amazake$p = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.LOOT); // Amazake - entity tick breakdown
+         if (this.level() instanceof ServerLevel serverLevel
+             && this.canPickUpLoot()
+             && this.isAlive()
+@@ -549,6 +_,7 @@
+             }
+         }
+ 
++        ink.hoka.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
+         profilerFiller.pop();
+     }
+ 
+@@ -808,6 +_,7 @@
+         this.sensing.tick();
+         profilerFiller.pop();
+         int i = this.tickCount + this.getId();
++        final int amazake$goals = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.GOALS); // Amazake - entity tick breakdown
+         if (i % 2 != 0 && this.tickCount > 1) {
+             profilerFiller.push("targetSelector");
+             this.targetSelector.tickRunningGoals(false);
+@@ -823,12 +_,17 @@
+             this.goalSelector.tick();
+             profilerFiller.pop();
+         }
++        ink.hoka.amazake.tick.EntityTickStats.exit(amazake$goals); // Amazake - entity tick breakdown
+ 
+         profilerFiller.push("navigation");
++        final int amazake$nav = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.NAVIGATION); // Amazake - entity tick breakdown
+         this.navigation.tick();
++        ink.hoka.amazake.tick.EntityTickStats.exit(amazake$nav); // Amazake - entity tick breakdown
+         profilerFiller.pop();
+         profilerFiller.push("mob tick");
++        final int amazake$brain = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.BRAIN); // Amazake - entity tick breakdown
+         this.customServerAiStep((ServerLevel)this.level());
++        ink.hoka.amazake.tick.EntityTickStats.exit(amazake$brain); // Amazake - entity tick breakdown
+         profilerFiller.pop();
+         profilerFiller.push("controls");
+         profilerFiller.push("move");

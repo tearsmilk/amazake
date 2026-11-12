@@ -24,6 +24,7 @@ public final class StressPlugin extends JavaPlugin {
     private TestWorld testWorld;
     private TickMonitor tickMonitor;
     private ProfilerBridge profiler;
+    private EntityTickBridge entityTicks;
     private @Nullable StageRunner run;
     private @Nullable StageRunner lastRun;
     private @Nullable Path lastResult;
@@ -36,6 +37,7 @@ public final class StressPlugin extends JavaPlugin {
         this.testWorld = new TestWorld(this);
         this.tickMonitor = new TickMonitor();
         this.getServer().getPluginManager().registerEvents(this.tickMonitor, this);
+        this.entityTicks = EntityTickBridge.load(this.getLogger());
         this.profiler = new StressProfiler(this);
         final StressCommand command = new StressCommand(this);
         final PluginCommand pluginCommand = this.getCommand("stress");
@@ -83,6 +85,11 @@ public final class StressPlugin extends JavaPlugin {
 
     public ProfilerBridge profiler() {
         return this.profiler;
+    }
+
+    /** Amazake's entity tick counters (unavailable, all no-ops, on other servers). */
+    public EntityTickBridge entityTicks() {
+        return this.entityTicks;
     }
 
     /** Replaces the profiler implementation (e.g. from another plugin or a test). */

@@ -1,0 +1,26 @@
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -3703,11 +_,13 @@
+             this.resetFallDistance();
+         }
+ 
++        final int amazake$p = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.TRAVEL); // Amazake - entity tick breakdown
+         if (this.getControllingPassenger() instanceof Player player && this.isAlive()) {
+             this.travelRidden(player, vec3);
+         } else if (this.canSimulateMovement() && this.isEffectiveAi()) {
+             this.travel(vec3);
+         }
++        ink.hoka.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
+ 
+         if (!this.level().isClientSide() || this.isLocalInstanceAuthoritative()) {
+             this.applyEffectsFromBlocks();
+@@ -3739,7 +_,9 @@
+             this.checkAutoSpinAttack(boundingBox, this.getBoundingBox());
+         }
+ 
++        final int amazake$push = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.PUSH); // Amazake - entity tick breakdown
+         this.pushEntities();
++        ink.hoka.amazake.tick.EntityTickStats.exit(amazake$push); // Amazake - entity tick breakdown
+         profilerFiller.pop();
+         // Paper start - Add EntityMoveEvent
+         if (((ServerLevel) this.level()).hasEntityMoveEvent && !(this instanceof Player)) {

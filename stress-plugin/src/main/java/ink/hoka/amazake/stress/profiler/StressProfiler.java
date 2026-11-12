@@ -75,18 +75,23 @@ public final class StressProfiler implements ProfilerBridge {
         }
         final int seconds = Math.min(settings.maxSeconds(), Math.max(1, requestedSeconds));
         final ProfilerSession session = new ProfilerSession(this.plugin, this, this.ticks, sender, seconds, settings);
-        final Thread worker = new Thread(session, THREAD_NAME);
-        worker.setDaemon(true);
-        worker.setUncaughtExceptionHandler((t, e) -> this.plugin.getLogger().log(Level.SEVERE, "Uncaught exception in " + t.getName(), e));
-        this.current = session;
-        this.thread = worker;
-        this.ticks.start();
+        boolean ticksStarted = false;
         try {
+            final Thread worker = new Thread(session, THREAD_NAME);
+            worker.setDaemon(true);
+            worker.setUncaughtExceptionHandler((t, e) -> this.plugin.getLogger().log(Level.SEVERE, "Uncaught exception in " + t.getName(), e));
+            this.current = session;
+            this.thread = worker;
+            this.ticks.start();
+            ticksStarted = true;
             worker.start();
         } catch (final RuntimeException | OutOfMemoryError e) {
             this.current = null;
             this.thread = null;
-            this.ticks.stop();
+            if (ticksStarted) {
+                this.ticks.stop();
+            }
+            session.releaseEntityTicks();
             this.messages.error(sender, "Не удалось запустить поток профайлера: " + e);
             return;
         }
@@ -144,6 +149,9 @@ public final class StressProfiler implements ProfilerBridge {
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+        if (session != null) {
+            session.releaseEntityTicks(); // the worker normally did it; never leave the server counting
         }
         this.ticks.stop();
     }

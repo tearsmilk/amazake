@@ -2,10 +2,12 @@ package ink.hoka.amazake.stress.profiler;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import ink.hoka.amazake.stress.EntityTickBridge;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.plugin.Plugin;
@@ -22,7 +24,11 @@ final class WorldSnapshots {
     record WorldStats(String name, String environment, int loadedChunks, int entities, int tileEntities, int players) {
     }
 
-    record Snapshot(List<WorldStats> worlds, int players) {
+    /**
+     * @param entityTicks Amazake's cumulative entity tick counters at this moment ({@link EntityTickBridge#snapshot()}),
+     *                    null when not available / not held
+     */
+    record Snapshot(List<WorldStats> worlds, int players, @Nullable Map<String, Object> entityTicks) {
         int entities() {
             int sum = 0;
             for (final WorldStats world : this.worlds) {
@@ -41,11 +47,13 @@ final class WorldSnapshots {
     }
 
     private final Plugin plugin;
+    private final @Nullable EntityTickBridge entityTicks;
     /** A request still waiting for the main thread; no second one is queued behind it. */
     private @Nullable CompletableFuture<Snapshot> pending;
 
-    WorldSnapshots(final Plugin plugin) {
+    WorldSnapshots(final Plugin plugin, final @Nullable EntityTickBridge entityTicks) {
         this.plugin = plugin;
+        this.entityTicks = entityTicks;
     }
 
     /**
@@ -65,7 +73,7 @@ final class WorldSnapshots {
         try {
             Bukkit.getScheduler().runTask(this.plugin, () -> {
                 try {
-                    future.complete(read(withTileEntities));
+                    future.complete(read(withTileEntities, this.entityTicks));
                     if (alsoOnMain != null) {
                         alsoOnMain.run();
                     }
@@ -82,8 +90,8 @@ final class WorldSnapshots {
         }
     }
 
-    /** Main thread only. */
-    static Snapshot read(final boolean withTileEntities) {
+    /** Main thread only. Also takes the entity tick counters' snapshot when {@code entityTicks} is given. */
+    static Snapshot read(final boolean withTileEntities, final @Nullable EntityTickBridge entityTicks) {
         final List<WorldStats> worlds = new ArrayList<>();
         int players = 0;
         for (final World world : Bukkit.getWorlds()) {
@@ -98,7 +106,7 @@ final class WorldSnapshots {
                 worldPlayers
             ));
         }
-        return new Snapshot(List.copyOf(worlds), players);
+        return new Snapshot(List.copyOf(worlds), players, entityTicks == null ? null : entityTicks.snapshot());
     }
 
     /** Names only, for when the main thread never answered at the end. */
