@@ -34,7 +34,30 @@ public final class Cores {
     /** The last settings, for a re-plan after CPUs went offline. */
     private static Settings last;
 
-    private record Settings(boolean enabled, Map<Role, String> overrides, boolean resizeChunkPool, boolean ignoreProcessorCount) {
+    private record Settings(boolean enabled, Map<Role, String> overrides, boolean resizeChunkPool, boolean ignoreProcessorCount,
+                            Reserve reserve) {
+    }
+
+    /**
+     * amazake.yml cpu.reserve.
+     *
+     * @param count          reserve CPUs, or {@link LayoutPlanner#AUTO_RESERVE}
+     * @param enabled        keep a reserve and move the tick there
+     * @param checkSeconds   time between two checks of the tick CPU
+     * @param threshold      foreign load on the tick CPU (fraction of one CPU) that counts as contention
+     * @param cooldownSeconds no second move within this time
+     */
+    public record Reserve(int count, boolean enabled, int checkSeconds, double threshold, int cooldownSeconds) {
+        public static final Reserve DEFAULT = new Reserve(LayoutPlanner.AUTO_RESERVE, true, 2, 0.25, 30);
+
+        int plannedCount() {
+            return this.enabled ? this.count : 0;
+        }
+
+        AffinityManager.ReserveSettings managerSettings() {
+            return new AffinityManager.ReserveSettings(this.enabled, Math.max(1, this.checkSeconds) * 1000L,
+                this.threshold, Math.max(0, this.cooldownSeconds) * 1000L);
+        }
     }
 
     private Cores() {
@@ -49,8 +72,23 @@ public final class Cores {
      */
     public static synchronized void configure(final boolean enabled, final Map<Role, String> overrides, final boolean resizeChunkPool,
                                               final boolean ignoreProcessorCount) {
-        last = new Settings(enabled, overrides == null ? Map.of() : Map.copyOf(overrides), resizeChunkPool, ignoreProcessorCount);
+        configure(enabled, overrides, resizeChunkPool, ignoreProcessorCount, Reserve.DEFAULT);
+    }
+
+    /**
+     * {@link #configure(boolean, Map, boolean, boolean)} with amazake.yml's cpu.reserve.
+     */
+    public static synchronized void configure(final boolean enabled, final Map<Role, String> overrides, final boolean resizeChunkPool,
+                                              final boolean ignoreProcessorCount, final Reserve reserve) {
+        last = new Settings(enabled, overrides == null ? Map.of() : Map.copyOf(overrides), resizeChunkPool, ignoreProcessorCount,
+            reserve == null ? Reserve.DEFAULT : reserve);
         apply(last, true);
+    }
+
+    /** Moves of the tick to a reserve CPU since the start (at most 200, oldest first). */
+    public static List<AffinityManager.Migration> migrations() {
+        final AffinityManager current = manager;
+        return current == null ? List.of() : current.migrations();
     }
 
     /** Plans again with the last settings after the manager found CPUs gone offline. Runs on the manager's thread. */
@@ -90,6 +128,7 @@ public final class Cores {
             manager.start(); // per-core load for /amazake cores, even without a layout
         }
         manager.setFullSet(topology.allowed());
+        manager.setReserve(settings.reserve().managerSettings());
         if (!shutdownHook) {
             shutdownHook = true;
             final AffinityManager toStop = manager;
@@ -107,7 +146,7 @@ public final class Cores {
             disabled("taskset not found", missing, null, List.of(), pool(mainThread, null, topology, keepPool));
             return;
         }
-        final LayoutPlanner.Plan plan = LayoutPlanner.plan(topology, settings.overrides());
+        final LayoutPlanner.Plan plan = LayoutPlanner.plan(topology, settings.overrides(), settings.reserve().plannedCount());
         for (final String warning : plan.warningsRu()) {
             LOGGER.warning("Раскладка ядер: " + warning);
         }
@@ -141,7 +180,7 @@ public final class Cores {
             LOGGER.warning("Раскладка ядер: " + hint);
             warnings.add(hint);
         }
-        manager.setLayout(layout);
+        final CoreLayout applied = manager.setLayout(layout);
         final String pool = settings.resizeChunkPool()
             ? pool(mainThread, layout, topology, keepPool)
             : pool(mainThread, null, topology, keepPool);
@@ -149,6 +188,12 @@ public final class Cores {
             + (topology.quota() > 0.0 ? ", quota " + LayoutPlanner.formatQuota(topology.quota()) : "") + ")");
         for (final String line : layout.tableRu()) {
             LOGGER.info(line);
+        }
+        if (applied != null && applied.tickCpu() != layout.tickCpu()) {
+            LOGGER.info("Amazake cores: tick stays on cpu" + applied.tickCpu() + " (moved there from cpu" + layout.tickCpu()
+                + " earlier): " + applied);
+            LOGGER.info("  Главный поток остаётся на ядре " + applied.tickCpu() + ": он переехал туда раньше, потому что ядру "
+                + layout.tickCpu() + " мешала чужая нагрузка. Ядро " + layout.tickCpu() + " остаётся резервом.");
         }
         if (pool != null) {
             LOGGER.info("  " + pool);
@@ -314,6 +359,9 @@ public final class Cores {
                 out.add(line.toString());
             }
         }
+        if (mgr != null && layout != null) {
+            out.addAll(describeReserve(layout, mgr, load));
+        }
         if (current.chunkPoolRu() != null) {
             out.add(current.chunkPoolRu());
         }
@@ -321,6 +369,62 @@ public final class Cores {
             out.add("Внимание: " + warning);
         }
         return out;
+    }
+
+    /** Reserve lines of /amazake cores: reserve CPUs and their load, foreign load on the tick CPU, the last move. */
+    static List<String> describeReserve(final CoreLayout layout, final AffinityManager mgr, final Map<Integer, Double> load) {
+        final List<String> out = new ArrayList<>();
+        final AffinityManager.ReserveSettings settings = mgr.reserveSettings();
+        if (layout.reserve().isEmpty()) {
+            if (settings.enabled()) {
+                out.add("Резерв: нет (cpu.reserve.count; в auto резерв есть от " + LayoutPlanner.AUTO_RESERVE_MIN_CPUS + " ядер).");
+            }
+            return out;
+        }
+        final StringBuilder line = new StringBuilder("Резерв: ядра [").append(CpuListParser.format(layout.reserve())).append("] пустые");
+        if (load != null) {
+            line.append(", загрузка:");
+            for (final int cpu : layout.reserve()) {
+                line.append(' ').append(cpu).append(" - ").append(Math.round(load.getOrDefault(cpu, 0.0) * 100.0)).append('%');
+            }
+        }
+        line.append(settings.enabled() && layout.canMoveTick() ? ". Если ядро tick займёт чужая нагрузка, главный поток переедет сюда." : ".");
+        out.add(line.toString());
+        final AffinityManager.ReserveCheck check = mgr.reserveCheck();
+        final String tickName = "Ядро tick " + (layout.tickCpu() < 0 ? CpuListParser.format(layout.cpus(Role.TICK)) : layout.tickCpu());
+        final String why = mgr.reserveStatusRu();
+        if (settings.enabled() && why != null) {
+            out.add(tickName + ": " + why);
+        } else if (settings.enabled() && (check == null || check.result().from() != layout.tickCpu())) {
+            out.add(tickName + ": чужая нагрузка ещё измеряется (нужны две проверки после запуска или переезда).");
+        } else if (check != null && check.result().measured()) {
+            final ContentionDetector.Result r = check.result();
+            out.add(String.format("Ядро tick %d: занято %d%%, из них главный поток %d%%, паузы GC %d%%, чужая нагрузка %d%% (порог %d%%)",
+                r.from(), Math.round(r.busy() * 100.0), Math.round(r.own() * 100.0), Math.round(r.gcPause() * 100.0),
+                Math.round(r.foreign() * 100.0), Math.round(settings.threshold() * 100.0))
+                + (AffinityManager.causePartsRu(r).isEmpty() ? "" : ": " + AffinityManager.causePartsRu(r)) + ".");
+        }
+        final List<AffinityManager.Migration> moves = mgr.migrations();
+        if (moves.isEmpty()) {
+            out.add("Переездов главного потока не было.");
+        } else {
+            final AffinityManager.Migration m = moves.get(moves.size() - 1);
+            final long agoSeconds = Math.max(0L, (System.currentTimeMillis() - m.wallMs()) / 1000L);
+            out.add("Последний переезд главного потока: ядро " + m.from() + " -> " + m.to() + ", " + ago(agoSeconds)
+                + " (чужая нагрузка " + Math.round(m.foreignLoad() * 100.0) + "%, steal " + Math.round(m.steal() * 100.0)
+                + "%). Всего переездов: " + moves.size() + ".");
+        }
+        return out;
+    }
+
+    private static String ago(final long seconds) {
+        if (seconds < 60L) {
+            return seconds + " с назад";
+        }
+        if (seconds < 3600L) {
+            return (seconds / 60L) + " мин назад";
+        }
+        return (seconds / 3600L) + " ч " + (seconds % 3600L / 60L) + " мин назад";
     }
 
     private static String bar(final double busy) {

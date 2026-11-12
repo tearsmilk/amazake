@@ -1320,3 +1320,9 @@ details.jvm[open] .chev { transform: rotate(90deg); }
 @media (max-width: 340px) {
   .widgets { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Moves of the main thread to a reserve core (migrations[]) on the cores heatmap. */
+.chart .mig-line { stroke: var(--ink); stroke-width: 1.5; stroke-dasharray: 3 3; opacity: 0.8; pointer-events: none; }
+.chart .mig-from { fill: var(--surface); stroke: var(--ink); stroke-width: 1.5; pointer-events: none; }
+.chart .mig-to { fill: var(--ink); stroke: var(--surface); stroke-width: 1; pointer-events: none; }
+.chart .mig-hit { fill: transparent; cursor: help; }

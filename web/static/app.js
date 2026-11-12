@@ -48,9 +48,13 @@
     network: { short: 'сеть', name: 'Сеть (Netty)', color: 'var(--s3)', groups: ['netty'] },
     gc: { short: 'GC', name: 'GC и JIT', color: 'var(--s4)', groups: ['gc', 'jit'] },
     background: { short: 'фон', name: 'Фоновые потоки', color: 'var(--s5)', groups: null }, // every other group
+    // Kept empty for the main thread to move to (amazake.yml cpu.reserve); no thread group runs there.
+    reserve: { short: 'резерв', name: 'Резерв (пустое ядро для переезда тика)', color: 'var(--s6)', groups: [] },
     shared: { short: 'общее', name: 'Без роли', color: REST_COLOR, groups: [] },
   };
-  const ROLE_ORDER = ['tick', 'chunks', 'network', 'gc', 'background', 'shared'];
+  const ROLE_ORDER = ['tick', 'chunks', 'network', 'gc', 'background', 'reserve', 'shared'];
+  /** Most migrations[] entries the viewer reads. */
+  const MAX_MIGRATIONS = 200;
 
   /** The roles of a coreRoles entry: "chunks+gc" -> ['chunks', 'gc']; [] for "shared". */
   function roleParts(v) {
@@ -338,6 +342,17 @@
       .map((s) => ({ t: clamp(num(s.t, 0), 0, MAX_TIME_MS), ms: Math.max(0, num(s.ms, 0)) }))
       .sort((a, b) => b.ms - a.ms);
 
+    // migrations[] (optional): moves of the main thread to a reserve core. Bad entries are dropped.
+    const coreIdOk = (v) => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < 65536;
+    const migrations = arr(raw.migrations).filter(isObj)
+      .filter((m) => coreIdOk(m.from) && coreIdOk(m.to) && m.from !== m.to && num(m.t, -1) >= 0 && num(m.t, -1) <= MAX_TIME_MS)
+      .slice(0, MAX_MIGRATIONS)
+      .map((m) => {
+        const f = numOrNull(m.foreignLoad);
+        return { t: num(m.t, 0), from: m.from, to: m.to, foreignLoad: f === null ? null : clamp(f, 0, 1) };
+      })
+      .sort((a, b) => a.t - b.t);
+
     let start = null;
     if (typeof raw.createdAt === 'string') {
       const d = new Date(raw.createdAt);
@@ -412,6 +427,7 @@
       groups: groups,
       threads: threads,
       lagSpikes: lagSpikes,
+      migrations: migrations,
       group: function (id) { return groups.find((g) => g.id === id) || null; },
     };
   }
@@ -792,7 +808,7 @@
       // With a core layout every row gets a role chip (and a colour strip, also on rows without a label).
       const compact = W < 560;
       const numW = compact ? 22 : 52;
-      const chipW = roles && roles.some((v) => v.indexOf('+') >= 0) ? 66 : 40;
+      const chipW = roles && roles.some((v) => v.indexOf('+') >= 0) ? 66 : roles && roles.indexOf('reserve') >= 0 ? 46 : 40;
       const ml = roles ? numW + chipW + 18 : 58, mr = 8, mt = 4, mb = 26;
       const pw = Math.max(40, W - ml - mr);
       const H = mt + rows * cellH + mb;
@@ -902,8 +918,37 @@
       hit.addEventListener('pointermove', onMove);
       hit.addEventListener('pointerdown', onMove);
       hit.addEventListener('pointerleave', () => { outline.setAttribute('visibility', 'hidden'); hideTip(); });
+      // Moves of the main thread: a dashed line at the time, a hollow dot on the old core, a filled one on the new.
+      for (const m of R.migrations) {
+        if (!(d1 > d0) || m.t < d0 || m.t > d1 + R.interval) continue;
+        const x = ml + clamp((m.t - d0) / (d1 - d0), 0, 1) * pw;
+        const mg = svg('g', { class: 'mig' });
+        mg.appendChild(svg('line', { x1: x, x2: x, y1: mt, y2: mt + rows * cellH, class: 'mig-line' }));
+        const dotR = clamp(cellH / 2, 2.5, 5);
+        if (m.from < rows) mg.appendChild(svg('circle', { cx: x, cy: mt + m.from * cellH + cellH / 2, r: dotR, class: 'mig-from' }));
+        if (m.to < rows) mg.appendChild(svg('circle', { cx: x, cy: mt + m.to * cellH + cellH / 2, r: dotR, class: 'mig-to' }));
+        const mhit = svg('rect', { x: x - 6, y: mt, width: 12, height: rows * cellH, class: 'mig-hit' });
+        const onMig = (evt) => {
+          outline.setAttribute('visibility', 'hidden');
+          showTip(evt, 'Переезд главного потока · ' + timeLabel(R, m.t), migrationRows(m));
+        };
+        mhit.addEventListener('pointermove', onMig);
+        mhit.addEventListener('pointerdown', onMig);
+        mhit.addEventListener('pointerleave', hideTip);
+        mg.appendChild(mhit);
+        root.appendChild(mg);
+      }
       box.appendChild(root);
     });
+  }
+
+  /** Tooltip rows of one migrations[] entry. */
+  function migrationRows(m) {
+    return [
+      { name: 'Откуда', value: 'ядро ' + m.from + ' (стало резервом)' },
+      { name: 'Куда', value: 'ядро ' + m.to },
+      { name: 'Чужая нагрузка на старом ядре', value: m.foreignLoad === null ? '—' : fmtPct(m.foreignLoad) },
+    ];
   }
 
   function heatLegend() {
@@ -1298,7 +1343,7 @@
       const loads = cores.map((k) => avg[k] || 0);
       const busy = sum(loads);
       let threadCores = null;
-      if (id !== 'shared') {
+      if (id !== 'shared' && id !== 'reserve') {
         threadCores = 0;
         for (const g of R.groups) if (roleHasGroup(id, g.id)) threadCores += g.avgCores;
       }
@@ -1321,7 +1366,16 @@
         'Ускоряет тики только уменьшение работы внутри тика (simulation-distance, лимиты мобов и сущностей, фермы, синхронные задачи плагинов) или процессор с более высокой частотой. ' +
         'Если чанки и дальше простаивают, часть их ядер (' + fmtCoreList(chunks.cores) + ') можно отдать фоновым задачам: cpu.layout.chunks и cpu.layout.background в amazake.yml, затем /amazake reload.');
     }
-    if (tick && main) {
+    if (R.migrations.length) {
+      const moves = R.migrations.length;
+      const last = R.migrations[moves - 1];
+      add('info', 'Главный поток переезжал на резервное ядро: ' + moves + ' ' + plural(moves, ['раз', 'раза', 'раз']),
+        'Ядро тика было занято чужой работой (другие процессы машины, прерывания, steal у VPS), и сервер перенёс главный поток на пустое резервное ядро (amazake.yml, cpu.reserve). ' +
+        'Последний переезд: ядро ' + last.from + ' → ' + last.to + ' в ' + timeLabel(R, last.t) + (last.foreignLoad === null ? '' : ', чужая нагрузка ' + fmtPct(last.foreignLoad)) + '. ' +
+        'Отметки переездов — на тепловой карте во вкладке «Ядра». Роли ядер в отчёте — на конец замера, поэтому средние по ролям смешивают время до и после переезда. ' +
+        'Переезд убирает помеху, но не делает тяжёлый тик легче; если переезды частые, найдите, что ещё работает на машине (top, htop).');
+    }
+    if (tick && main && !R.migrations.length) {
       const extra = tick.busyCores - main.avgCores;
       if (extra >= 0.2) {
         add(extra >= 0.4 ? 'warning' : 'info', 'На ядре тика работает не только главный поток: ещё ' + fmtCores(extra),
@@ -1783,6 +1837,23 @@
     }, t.wrap);
   }
 
+  /** «Переезды главного потока»: one row per migrations[] entry; null when there are none. */
+  function migrationsCard(R) {
+    if (!R.migrations.length) return null;
+    const columns = [
+      { label: 'Когда', cls: 'mono nowrap', render: (m) => timeLabel(R, m.t) },
+      { label: 'Откуда', cls: 'mono', render: (m) => 'ядро ' + m.from },
+      { label: 'Куда', cls: 'mono', render: (m) => 'ядро ' + m.to },
+      { label: 'Чужая нагрузка', short: 'Чужая', cls: 'num mono', render: (m) => (m.foreignLoad === null ? '—' : fmtPct(m.foreignLoad)) },
+    ];
+    const t = table(columns, R.migrations);
+    return card({
+      title: 'Переезды главного потока',
+      desc: 'Ядро тика было занято не главным потоком (другие процессы, прерывания, steal) две проверки подряд, и сервер перенёс главный поток на пустое резервное ядро; старое ядро стало резервом. ' +
+        'На тепловой карте переезд — пунктир: кружок-контур на старом ядре, закрашенный кружок на новом.',
+    }, t.wrap);
+  }
+
   function tabCores(R) {
     const C = R.system.logicalCores;
     const out = [];
@@ -1795,6 +1866,8 @@
       }, [R.system.coreRoles ? roleLegend(R) : null, heatmap(R)]));
       const layout = R.system.coreRoles ? layoutTableCard(R) : null;
       if (layout) out.push(layout);
+      const moves = migrationsCard(R);
+      if (moves) out.push(moves);
       const roles = R.system.coreRoles;
       const combined = roles && roles.some((v) => v.indexOf('+') >= 0);
       const bars = el('div', { class: 'core-bars' + (roles ? ' has-roles' : '') + (combined ? ' combined-roles' : '') });

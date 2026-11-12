@@ -33,6 +33,14 @@ import java.util.logging.Logger;
  * refused (EPERM) the manager says so once, in Russian, and stops pinning. On EINVAL (a CPU went
  * offline) it re-reads the online CPUs and asks for a new plan once before giving up.
  * {@code setLayout(null)} and {@link #shutdown} give every thread the full allowed CPU set back.</p>
+ *
+ * <p>Reserve and tick moves ({@link #setReserve}): with a layout that has reserve CPUs, every
+ * {@code check-seconds} this thread also reads the main thread's CPU time (/proc/PID/task/TID/stat) and
+ * hands it with /proc/stat to a {@link ContentionDetector}. When it says MIGRATE, the layout becomes
+ * {@link CoreLayout#withTickMovedTo}: the next scan pins "Server thread" to the reserve CPU and takes the
+ * old tick CPU out of every thread's set (it is the new, empty reserve). A later {@link #setLayout} with the
+ * same tick CPU (a /amazake reload) keeps the moved tick while its CPU is still a reserve CPU of the new
+ * layout, so a reload does not pin the main thread back onto the contended CPU.</p>
  */
 public final class AffinityManager {
 
@@ -45,6 +53,37 @@ public final class AffinityManager {
     private static final Logger LOGGER = Logger.getLogger("Amazake");
     /** Result of {@code taskset --version}: null until checked, "" when fine, else the problem in Russian. */
     private static volatile String tasksetVersionProblem;
+
+    /** Most moves remembered for {@link #migrations()}. */
+    static final int MIGRATIONS_KEPT = 200;
+
+    /**
+     * cpu.reserve settings.
+     *
+     * @param enabled    check for foreign load and move the tick
+     * @param checkMs    time between two checks
+     * @param threshold  foreign load (fraction of one CPU) that counts as contention
+     * @param cooldownMs no second move within this time
+     */
+    public record ReserveSettings(boolean enabled, long checkMs, double threshold, long cooldownMs) {
+        public static final ReserveSettings OFF = new ReserveSettings(false, 2_000L, 0.25, 30_000L);
+    }
+
+    /**
+     * A move of the tick.
+     *
+     * @param wallMs      System.currentTimeMillis() of the move
+     * @param from        the old tick CPU (now reserve)
+     * @param to          the new tick CPU
+     * @param foreignLoad foreign load on {@code from} over the last check (fraction of one CPU)
+     * @param steal       steal fraction on {@code from} over the last check
+     */
+    public record Migration(long wallMs, int from, int to, double foreignLoad, double steal) {
+    }
+
+    /** The last reserve check, for /amazake cores. */
+    public record ReserveCheck(long wallMs, ContentionDetector.Result result) {
+    }
 
     /** A thread as the last scan saw it. {@code cpus} is its CPU list read back from the kernel. */
     public record PinnedThread(int tid, String comm, String group, Role role, String cpus) {
@@ -64,6 +103,8 @@ public final class AffinityManager {
 
     // Guarded by lock.
     private CoreLayout target;
+    /** The last layout passed to {@link #setLayout}, before any move of the tick. */
+    private CoreLayout planned;
     private long targetVersion;
     private boolean exit;
     private Thread thread;
@@ -73,6 +114,11 @@ public final class AffinityManager {
     private boolean pinned;
     private boolean otherFailureLogged;
     private boolean replanned;
+    private ContentionDetector detector;
+    private ReserveSettings detectorSettings;
+    private long nextReserveCheck;
+    private boolean reserveCheckScheduled;
+    private boolean cannotMoveLogged;
 
     // Published to readers.
     private volatile List<PinnedThread> snapshot = List.of();
@@ -81,6 +127,11 @@ public final class AffinityManager {
     private volatile CoreLayout active;
     private volatile String failure;
     private volatile int scans;
+    private volatile ReserveSettings reserveSettings = ReserveSettings.OFF;
+    private volatile ReserveCheck reserveCheck;
+    /** Why the reserve check cannot measure or move right now, in Russian; null when it can. */
+    private volatile String reserveStatusRu;
+    private final java.util.Deque<Migration> migrations = new java.util.ArrayDeque<>();
 
     /**
      * @param pid            the process whose threads to pin; "self" for this server
@@ -160,15 +211,44 @@ public final class AffinityManager {
     /**
      * Pins threads to {@code layout}, or with null gives every thread the full CPU set back. Returns at
      * once; the work happens on the manager's thread, which this starts when needed.
+     *
+     * <p>When the tick has moved to a reserve CPU since the last call, and {@code layout} has the same tick
+     * CPU as that call's layout and still has the CPU the tick moved to in its reserve, the move is kept:
+     * the answer is {@code layout} with the tick moved there. Nothing is re-applied when that equals what is
+     * already wanted.</p>
+     *
+     * @return the layout that will be applied ({@code layout}, or {@code layout} with the earlier move kept)
      */
-    public void setLayout(final CoreLayout layout) {
+    public CoreLayout setLayout(final CoreLayout layout) {
         synchronized (this.lock) {
-            this.target = layout;
+            final CoreLayout effective = keepMove(layout, this.planned, this.target);
+            this.planned = layout;
+            this.ensureThread();
+            if (effective != null && effective.equals(this.target)) {
+                return effective; // already wanted: keep the detector's baseline and the pins
+            }
+            this.target = effective;
             this.targetVersion++;
             this.failure = null;
-            this.ensureThread();
             this.lock.notifyAll();
+            return effective;
         }
+    }
+
+    /**
+     * {@code layout}, or {@code layout} with the tick moved to where {@code current} has it, when the tick
+     * moved away from {@code previous}'s tick CPU, {@code layout} keeps that tick CPU, and the CPU the tick
+     * moved to is a reserve CPU of {@code layout}.
+     */
+    static CoreLayout keepMove(final CoreLayout layout, final CoreLayout previous, final CoreLayout current) {
+        if (layout == null || previous == null || current == null || !layout.canMoveTick() || !current.canMoveTick()) {
+            return layout;
+        }
+        final int movedTo = current.tickCpu();
+        if (layout.tickCpu() != previous.tickCpu() || movedTo == layout.tickCpu() || !layout.isReserve(movedTo)) {
+            return layout;
+        }
+        return layout.withTickMovedTo(movedTo);
     }
 
     /** The CPU set threads get back when unpinned (after a re-plan with fewer CPUs). */
@@ -179,6 +259,35 @@ public final class AffinityManager {
     /** What to run, on this manager's thread, when CPUs went offline and the layout needs a new plan. */
     public void onCpusLost(final Runnable action) {
         this.onCpusLost = action;
+    }
+
+    /** cpu.reserve settings; takes effect at the next check. */
+    public void setReserve(final ReserveSettings settings) {
+        this.reserveSettings = settings == null ? ReserveSettings.OFF : settings;
+    }
+
+    public ReserveSettings reserveSettings() {
+        return this.reserveSettings;
+    }
+
+    /** The last reserve check with a measurement of the current layout, or null (no reserve, not measured yet). */
+    public ReserveCheck reserveCheck() {
+        return this.reserveCheck;
+    }
+
+    /**
+     * Why the tick CPU is not being measured or the tick cannot move, in Russian ("главный поток не
+     * найден"...), or null when the checks run normally.
+     */
+    public String reserveStatusRu() {
+        return this.reserveStatusRu;
+    }
+
+    /** Moves of the tick so far (at most {@value #MIGRATIONS_KEPT}, oldest first). */
+    public List<Migration> migrations() {
+        synchronized (this.migrations) {
+            return List.copyOf(this.migrations);
+        }
     }
 
     /** Starts the manager's thread (load sampling) without pinning anything. */
@@ -266,6 +375,12 @@ public final class AffinityManager {
                 }
                 final long now = System.nanoTime();
                 if (version != seenVersion || now - nextScan >= 0L) {
+                    if (version != seenVersion) {
+                        if (this.detector != null) {
+                            this.detector.reset(); // a new layout: measure from scratch (the cooldown stays)
+                        }
+                        this.reserveCheck = null; // it measured the old layout's tick CPU
+                    }
                     seenVersion = version;
                     this.cycle(want);
                     // Threads started by a pinned thread inherit its CPUs until they are scanned, so
@@ -279,6 +394,9 @@ public final class AffinityManager {
                     this.loadAtNanos = System.nanoTime();
                 }
                 previousStat = stat;
+                if (!stat.isEmpty()) {
+                    this.reserveTick(stat, seenVersion);
+                }
                 synchronized (this.lock) {
                     if (!this.exit && this.targetVersion == seenVersion) {
                         this.lock.wait(SAMPLE_INTERVAL_MS);
@@ -290,6 +408,209 @@ public final class AffinityManager {
         } catch (final RuntimeException e) {
             LOGGER.log(java.util.logging.Level.WARNING, "Раскладка ядер: поток " + THREAD_NAME + " упал", e);
             this.publish(null);
+        }
+    }
+
+    /**
+     * A reserve check when one is due: measures the tick CPU and moves the tick when the detector says so.
+     * The move only changes the target layout; the scan right after it does the pinning.
+     */
+    private void reserveTick(final Map<Integer, long[]> stat, final long seenVersion) {
+        final ReserveSettings settings = this.reserveSettings;
+        final CoreLayout layout = this.active;
+        if (!settings.enabled() || layout == null || layout.reserve().isEmpty()) {
+            this.reserveCheck = null;
+            this.reserveStatusRu = null;
+            return;
+        }
+        final long nowMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
+        if (this.reserveCheckScheduled && nowMs - this.nextReserveCheck < 0L) {
+            return;
+        }
+        this.reserveCheckScheduled = true;
+        this.nextReserveCheck = nowMs + Math.max(250L, settings.checkMs());
+        if (!layout.canMoveTick()) {
+            this.reserveStatusRu = "главный поток не может переехать в резерв: у tick не одно своё ядро"
+                + " (cpu.layout.tick задан списком или ядро tick делит другая роль). Чужая нагрузка не проверяется.";
+            if (!this.cannotMoveLogged) {
+                this.cannotMoveLogged = true;
+                LOGGER.info("Amazake cores: reserve " + layout.reserve() + " kept empty, but the tick cannot move (it does not own exactly one CPU)");
+                LOGGER.info("Раскладка ядер: резерв [" + CpuListParser.format(layout.reserve()) + "] пустой, но главный поток"
+                    + " не может туда переехать: у tick не одно своё ядро (cpu.layout.tick задан списком или делит ядро с другой ролью).");
+            }
+            return;
+        }
+        if (this.detector == null || !settings.equals(this.detectorSettings)) {
+            final ContentionDetector fresh = new ContentionDetector(settings.threshold(), settings.cooldownMs());
+            fresh.inheritFrom(this.detector); // new settings: the cooldown keeps running from the last move
+            this.detector = fresh;
+            this.detectorSettings = settings;
+        }
+        final int tickCpu = layout.tickCpu();
+        // Reserve CPUs on the tick's own physical core are no place to go; a reserve CPU's siblings that run
+        // no server thread must be idle too, or the tick would share its core with someone else.
+        final List<Integer> tickSiblings = layout.siblingsOf(tickCpu);
+        final List<Integer> targets = new ArrayList<>();
+        final Map<Integer, List<Integer>> quiet = new HashMap<>();
+        for (final int cpu : layout.reserve()) {
+            if (tickSiblings.contains(cpu)) {
+                continue;
+            }
+            targets.add(cpu);
+            final List<Integer> idleSiblings = new ArrayList<>();
+            for (final int sibling : layout.siblingsOf(cpu)) {
+                if (layout.rolesOf(sibling).isEmpty()) {
+                    idleSiblings.add(sibling);
+                }
+            }
+            quiet.put(cpu, idleSiblings);
+        }
+        PinnedThread main = null;
+        for (final PinnedThread thread : this.snapshot) {
+            if (thread.role() == Role.TICK) {
+                main = thread;
+                break;
+            }
+        }
+        final long ownTicks;
+        final int tid;
+        if (main == null) {
+            tid = -1;
+            ownTicks = -1L;
+            this.reserveStatusRu = "поток Server thread не найден, чужая нагрузка не измеряется.";
+        } else if (!main.cpus().equals(Integer.toString(tickCpu))) {
+            tid = -1;
+            ownTicks = -1L; // not pinned yet: warm-up
+            this.reserveStatusRu = "главный поток ещё не закреплён за ядром " + tickCpu + " (сейчас ядра [" + main.cpus()
+                + "]), чужая нагрузка не измеряется.";
+        } else if (targets.isEmpty()) {
+            tid = main.tid();
+            ownTicks = ContentionDetector.cpuTicks(this.readStat(tid));
+            this.reserveStatusRu = "все резервные ядра [" + CpuListParser.format(layout.reserve()) + "] - второй поток"
+                + " физического ядра tick, переезд туда не поможет.";
+        } else {
+            tid = main.tid();
+            ownTicks = ContentionDetector.cpuTicks(this.readStat(tid));
+            this.reserveStatusRu = null;
+        }
+        final ContentionDetector.Result result = this.detector.check(nowMs, tickCpu, targets, quiet, stat, tid, ownTicks, gcPauseMs());
+        if (result.measured()) {
+            this.reserveCheck = new ReserveCheck(System.currentTimeMillis(), result);
+        }
+        switch (result.kind()) {
+            case MIGRATE -> this.moveTick(layout, result, seenVersion);
+            case NO_FREE_RESERVE -> {
+                final String again = result.suppressed() > 0
+                    ? " (" + result.suppressed() + " more time(s) since the last report)" : "";
+                LOGGER.info("Amazake cores: tick cpu" + tickCpu + " is contended (foreign load " + pct(result.foreign())
+                    + ", steal " + pct(result.steal()) + "), but no reserve CPU is idle " + result.reserveLoad() + again);
+                LOGGER.warning("Раскладка ядер: на ядре " + tickCpu + " главному потоку мешает чужая нагрузка ("
+                    + causesRu(result) + "), но все резервные ядра [" + CpuListParser.format(layout.reserve())
+                    + "] тоже заняты, переезжать некуда. Посмотрите в top/htop, что ещё работает на машине."
+                    + (result.suppressed() > 0 ? " С прошлого такого сообщения это повторялось ещё " + result.suppressed()
+                        + " раз; следующее - не раньше чем через "
+                        + TimeUnit.MILLISECONDS.toMinutes(ContentionDetector.NO_FREE_REPORT_MS) + " мин." : ""));
+            }
+            default -> {
+            }
+        }
+    }
+
+    /** Pause collectors (not the "... Cycles" beans of ZGC and Shenandoah, which count concurrent work). */
+    private static final List<java.lang.management.GarbageCollectorMXBean> PAUSE_COLLECTORS = pauseCollectors();
+
+    private static List<java.lang.management.GarbageCollectorMXBean> pauseCollectors() {
+        final List<java.lang.management.GarbageCollectorMXBean> out = new ArrayList<>();
+        try {
+            for (final java.lang.management.GarbageCollectorMXBean bean : java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+                if (!bean.getName().contains("Cycles")) {
+                    out.add(bean);
+                }
+            }
+        } catch (final RuntimeException | LinkageError e) {
+            return List.of();
+        }
+        return List.copyOf(out);
+    }
+
+    /** The JVM's cumulative stop-the-world GC pause time in ms, or -1 when unknown. */
+    static long gcPauseMs() {
+        if (PAUSE_COLLECTORS.isEmpty()) {
+            return -1L;
+        }
+        long total = 0L;
+        for (final java.lang.management.GarbageCollectorMXBean bean : PAUSE_COLLECTORS) {
+            final long time = bean.getCollectionTime();
+            if (time < 0L) {
+                return -1L;
+            }
+            total += time;
+        }
+        return total;
+    }
+
+    /** "97% ядра: другие процессы 90%, прерывания 5%, steal 2%" - the parts of the foreign load that are at least 1%. */
+    static String causesRu(final ContentionDetector.Result result) {
+        final String parts = causePartsRu(result);
+        return pct(result.foreign()) + " ядра" + (parts.isEmpty() ? "" : ": " + parts);
+    }
+
+    /** "другие процессы 90%, прерывания 5%" - the parts of the foreign load that are at least 1%; may be empty. */
+    static String causePartsRu(final ContentionDetector.Result result) {
+        final List<String> parts = new ArrayList<>();
+        final double foreign = result.foreign();
+        if (!(foreign >= 0.01)) {
+            return ""; // nothing foreign (or not measured): no noise like "steal 1%"
+        }
+        // irq and steal are measured apart from the GC correction: never show more than the foreign load.
+        final double irq = Math.min(result.irq(), foreign);
+        final double steal = Math.min(result.steal(), foreign - irq);
+        final double processes = Math.max(0.0, foreign - irq - steal);
+        if (processes >= 0.005) {
+            parts.add("другие процессы " + pct(processes));
+        }
+        if (irq >= 0.005) {
+            parts.add("прерывания " + pct(irq));
+        }
+        if (steal >= 0.005) {
+            parts.add("гипервизор забирал (steal) " + pct(steal));
+        }
+        return String.join(", ", parts);
+    }
+
+    private void moveTick(final CoreLayout layout, final ContentionDetector.Result result, final long seenVersion) {
+        final CoreLayout moved = layout.withTickMovedTo(result.to());
+        synchronized (this.lock) {
+            if (this.targetVersion != seenVersion || !layout.equals(this.target)) {
+                return; // Cores set a new layout meanwhile: it wins
+            }
+            this.target = moved;
+            this.targetVersion++;
+        }
+        final Migration migration = new Migration(System.currentTimeMillis(), result.from(), result.to(), result.foreign(), result.steal());
+        synchronized (this.migrations) {
+            this.migrations.addLast(migration);
+            while (this.migrations.size() > MIGRATIONS_KEPT) {
+                this.migrations.removeFirst();
+            }
+        }
+        LOGGER.info("Amazake cores: tick moved cpu" + result.from() + " -> cpu" + result.to() + " (foreign load "
+            + pct(result.foreign()) + ", steal " + pct(result.steal()) + ")");
+        LOGGER.info("Раскладка ядер: на ядре " + result.from() + " главному потоку мешала чужая нагрузка ("
+            + causesRu(result) + "), поэтому главный поток переехал на резервное ядро " + result.to() + ". Ядро " + result.from()
+            + " стало резервом: потоки сервера с него убраны. Следующий переезд - не раньше чем через "
+            + TimeUnit.MILLISECONDS.toSeconds(this.reserveSettings.cooldownMs()) + " с.");
+    }
+
+    private static String pct(final double fraction) {
+        return Double.isNaN(fraction) ? "?" : Math.round(fraction * 100.0) + "%";
+    }
+
+    private String readStat(final int tid) {
+        try {
+            return Files.readString(this.tasks.resolve(Integer.toString(tid)).resolve("stat"), StandardCharsets.UTF_8);
+        } catch (final IOException | RuntimeException e) {
+            return null;
         }
     }
 

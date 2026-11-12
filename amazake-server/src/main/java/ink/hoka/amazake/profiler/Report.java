@@ -17,7 +17,8 @@ record Report(
     List<Sample> samples,
     List<ThreadEntry> threads,
     List<GroupEntry> groups,
-    List<LagSpike> lagSpikes
+    List<LagSpike> lagSpikes,
+    List<Migration> migrations
 ) {
 
     static final String FORMAT = "amazake-profile";
@@ -84,5 +85,9 @@ record Report(
     }
 
     record LagSpike(long t, double ms) {
+    }
+
+    /** A move of the main thread to a reserve CPU (optional list: null when none happened during the measurement). */
+    record Migration(long t, int from, int to, double foreignLoad) {
     }
 }

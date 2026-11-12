@@ -37,6 +37,8 @@ final class ProfilerSession implements Runnable {
     private final List<Report.Sample> samples = new ArrayList<>();
     private long lastGcCount;
     private long lastGcTimeMs;
+    /** System.currentTimeMillis() at t = 0 of the samples. */
+    private long startWallMs;
 
     ProfilerSession(final CommandSender sender, final int seconds, final int intervalMs) {
         this.sender = sender;
@@ -76,6 +78,7 @@ final class ProfilerSession implements Runnable {
         this.ticks.start();
         this.readGc();
         final long startNs = System.nanoTime();
+        this.startWallMs = System.currentTimeMillis();
         final long deadlineNs = startNs + TimeUnit.SECONDS.toNanos(this.seconds);
         long lastNs = startNs;
         while (true) {
@@ -178,8 +181,25 @@ final class ProfilerSession implements Runnable {
             List.copyOf(this.samples),
             threads,
             groupEntries,
-            spikes
+            spikes,
+            this.migrations(durationMs)
         );
+    }
+
+    /** Moves of the tick to a reserve CPU during the measurement; null (left out) when there were none. */
+    private List<Report.Migration> migrations(final long durationMs) {
+        final List<Report.Migration> out = new ArrayList<>();
+        try {
+            for (final ink.hoka.amazake.cpu.AffinityManager.Migration m : ink.hoka.amazake.cpu.Cores.migrations()) {
+                final long t = m.wallMs() - this.startWallMs;
+                if (t >= 0L && t <= durationMs + this.intervalMs) {
+                    out.add(new Report.Migration(Math.min(t, durationMs), m.from(), m.to(), round(m.foreignLoad())));
+                }
+            }
+        } catch (final RuntimeException | LinkageError e) {
+            Profiler.LOGGER.warning("Profiler could not read the tick moves: " + e);
+        }
+        return out.isEmpty() ? null : out;
     }
 
     /**

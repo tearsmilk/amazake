@@ -36,6 +36,17 @@ import java.util.TreeSet;
  * <p>Manual overrides (amazake.yml {@code cpu.layout.<role>}) replace a role's CPUs. CPUs a manual
  * role takes are removed from the automatic roles; allowed CPUs nobody uses then go to background
  * (when background is automatic), and an automatic role left without CPUs shares background's.</p>
+ *
+ * <p>Reserve (amazake.yml {@code cpu.reserve.count}): CPUs kept empty, for the tick to move to when its
+ * own CPU gets busy with foreign work (see {@link ContentionDetector}). "auto" is 1 when at least
+ * {@value #AUTO_RESERVE_MIN_CPUS} CPUs are allowed, else 0. Reserve CPUs are taken out of background only,
+ * never from tick or chunks nor from a role set by hand, and never on the tick's own physical core (SMT
+ * sibling): from the end of background's list, CPUs that no other role shares first. When the tick's SMT
+ * sibling is kept idle (N &gt;= 8 with SMT), a reserve CPU's sibling is kept idle as well (taken out of
+ * background, shown as unused), so the moved tick again has a physical core to itself; a CPU whose sibling
+ * cannot be idled is skipped. On 6 CPUs with SMT (3 cores) the only background CPU is the tick's sibling,
+ * so "auto" gives no reserve there. Roles that lose their last CPU to the reserve share another role's CPUs
+ * (background, then network, gc, chunks), as on small machines.</p>
  */
 public final class LayoutPlanner {
 
@@ -57,14 +68,30 @@ public final class LayoutPlanner {
         }
     }
 
+    /** {@code cpu.reserve.count: auto} means 1 reserve CPU from this many allowed CPUs, 0 below. */
+    public static final int AUTO_RESERVE_MIN_CPUS = 6;
+    /** {@link #plan(CpuTopology, Map, int)}: the reserve count is "auto". */
+    public static final int AUTO_RESERVE = -1;
+
     private LayoutPlanner() {
+    }
+
+    /** A plan without a reserve. */
+    public static Plan plan(final CpuTopology topology, final Map<Role, String> overrides) {
+        return plan(topology, overrides, 0);
+    }
+
+    /** How many reserve CPUs "auto" means for {@code n} allowed CPUs. */
+    public static int autoReserve(final int n) {
+        return n >= AUTO_RESERVE_MIN_CPUS ? 1 : 0;
     }
 
     /**
      * @param topology  allowed CPUs and SMT siblings
      * @param overrides config value per role ("auto" or a CPU list); missing roles are "auto"
+     * @param reserve   reserve CPUs wanted, or {@link #AUTO_RESERVE}; 0 for none
      */
-    public static Plan plan(final CpuTopology topology, final Map<Role, String> overrides) {
+    public static Plan plan(final CpuTopology topology, final Map<Role, String> overrides, final int reserve) {
         final List<String> warnings = new ArrayList<>();
         final int n = topology.logical();
         if (n <= 1) {
@@ -115,7 +142,7 @@ public final class LayoutPlanner {
                 + " останавливать потоки по квоте на любых ядрах.");
         }
         if (manual.isEmpty()) {
-            return new Plan(new CoreLayout(topology.allowed(), auto), null, null, List.copyOf(warnings));
+            return new Plan(withReserve(topology, auto, manual.keySet(), reserve, warnings), null, null, List.copyOf(warnings));
         }
 
         final Set<Integer> claimed = new TreeSet<>();
@@ -161,7 +188,111 @@ public final class LayoutPlanner {
                 + role.id() + " делит ядра [" + CpuListParser.format(fallback) + "].");
             result.put(role, fallback);
         }
-        return new Plan(new CoreLayout(topology.allowed(), result), null, null, List.copyOf(warnings));
+        return new Plan(withReserve(topology, result, manual.keySet(), reserve, warnings), null, null, List.copyOf(warnings));
+    }
+
+    /**
+     * The layout of {@code roles} with {@code requested} reserve CPUs taken out of background.
+     *
+     * @param manualRoles roles set by hand: their CPUs never go to the reserve
+     */
+    static CoreLayout withReserve(final CpuTopology topology, final Map<Role, List<Integer>> roles, final Set<Role> manualRoles,
+                                  final int requested, final List<String> warnings) {
+        final int n = topology.logical();
+        final int want = requested < 0 ? autoReserve(n) : requested;
+        final Map<Integer, List<Integer>> siblings = topology.siblings();
+        if (want <= 0) {
+            return new CoreLayout(topology.allowed(), roles, List.of(), siblings);
+        }
+        final Map<Role, List<Integer>> result = new EnumMap<>(Role.class);
+        roles.forEach((role, list) -> result.put(role, new ArrayList<>(list)));
+        final Set<Integer> forbidden = new TreeSet<>(result.get(Role.TICK));
+        forbidden.addAll(result.get(Role.CHUNKS));
+        for (final Role role : manualRoles) {
+            forbidden.addAll(result.get(role));
+        }
+        final Set<Integer> used = new TreeSet<>();
+        result.values().forEach(used::addAll);
+        // A reserve on the tick's own physical core is useless: a neighbour that takes the tick CPU would
+        // share the core with the moved tick. And when the tick's SMT sibling is kept idle (big machines),
+        // a reserve CPU's sibling is kept idle too, so after a move the tick has its core to itself again.
+        final Set<Integer> tickSiblings = new TreeSet<>();
+        boolean idleTickSibling = false;
+        for (final int cpu : result.get(Role.TICK)) {
+            for (final int sibling : siblings.getOrDefault(cpu, List.of(cpu))) {
+                tickSiblings.add(sibling);
+                idleTickSibling |= sibling != cpu && !used.contains(sibling);
+            }
+        }
+        final List<Integer> background = result.get(Role.BACKGROUND);
+        final List<Integer> candidates = new ArrayList<>();
+        for (int i = background.size() - 1; i >= 0; i--) {
+            final int cpu = background.get(i);
+            if (!forbidden.contains(cpu) && !tickSiblings.contains(cpu)) {
+                candidates.add(cpu);
+            }
+        }
+        // Stable sort keeps "from the end of background" within each rank: CPUs no other role shares first.
+        candidates.sort(java.util.Comparator.comparingInt((Integer cpu) -> {
+            int users = 0;
+            for (final List<Integer> list : result.values()) {
+                users += list.contains(cpu) ? 1 : 0;
+            }
+            return users;
+        }));
+        final List<Integer> reserve = new ArrayList<>();
+        final Set<Integer> idle = new TreeSet<>();
+        for (final int cpu : candidates) {
+            if (reserve.size() >= want) {
+                break;
+            }
+            if (idle.contains(cpu)) {
+                continue;
+            }
+            final List<Integer> toIdle = new ArrayList<>();
+            boolean fits = true;
+            if (idleTickSibling) {
+                for (final int sibling : siblings.getOrDefault(cpu, List.of(cpu))) {
+                    if (sibling == cpu || idle.contains(sibling) || !used.contains(sibling)) {
+                        continue; // itself, or idle already
+                    }
+                    if (!candidates.contains(sibling) || reserve.contains(sibling)) {
+                        fits = false; // the sibling works for tick, chunks or a manual role: it cannot be idled
+                        break;
+                    }
+                    toIdle.add(sibling);
+                }
+            }
+            if (fits) {
+                reserve.add(cpu);
+                idle.addAll(toIdle);
+            }
+        }
+        if (reserve.size() < want && requested >= 0) {
+            warnings.add("cpu.reserve.count: " + requested + " - столько ядер в резерв не набралось, в резерве "
+                + reserve.size() + ". Резерв берётся только из ядер background, которые не заняты tick, chunks"
+                + " и ролями, заданными вручную, и не делят физическое ядро (SMT) с tick.");
+        }
+        if (reserve.isEmpty()) {
+            return new CoreLayout(topology.allowed(), roles, List.of(), siblings);
+        }
+        for (final Map.Entry<Role, List<Integer>> entry : result.entrySet()) {
+            entry.getValue().removeAll(reserve);
+            entry.getValue().removeAll(idle);
+        }
+        // Roles left without CPUs share another role's, the way the small automatic layouts combine them.
+        for (final Role role : List.of(Role.NETWORK, Role.GC, Role.BACKGROUND)) {
+            if (!result.get(role).isEmpty()) {
+                continue;
+            }
+            for (final Role donor : List.of(Role.BACKGROUND, Role.NETWORK, Role.GC, Role.CHUNKS)) {
+                if (donor != role && !result.get(donor).isEmpty()) {
+                    result.put(role, new ArrayList<>(result.get(donor)));
+                    break;
+                }
+            }
+        }
+        return new CoreLayout(topology.allowed(), result, reserve, siblings);
     }
 
     /** "2" or "1.5". */

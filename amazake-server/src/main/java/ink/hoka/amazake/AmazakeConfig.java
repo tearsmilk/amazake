@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import ink.hoka.amazake.cpu.Cores;
+import ink.hoka.amazake.cpu.LayoutPlanner;
 import ink.hoka.amazake.cpu.Role;
 import org.bukkit.configuration.file.YamlConfiguration;
 
@@ -55,6 +56,8 @@ public final class AmazakeConfig {
     public static boolean cpuLayoutResizeChunkPool = true;
     /** Pin threads even without -XX:ActiveProcessorCount. */
     public static boolean cpuLayoutIgnoreProcessorCount = false;
+    /** cpu.reserve: empty CPUs the main thread moves to when its own CPU is busy with foreign work. */
+    public static Cores.Reserve cpuReserve = Cores.Reserve.DEFAULT;
 
     private AmazakeConfig() {
     }
@@ -134,13 +137,35 @@ public final class AmazakeConfig {
             "Закреплять потоки, даже если нет флага -XX:ActiveProcessorCount. Без флага Java после закрепления",
             "считает ядра по потоку (у главного - 1), и пулы потоков плагинов получаются слишком маленькими.");
 
+        final boolean reserveEnabled = bool("cpu.reserve.enabled", true,
+            "Резерв и переезд главного потока. Резервные ядра остаются пустыми: Amazake не ставит туда ни одного",
+            "потока. Каждые check-seconds секунд он смотрит, сколько ядро tick было занято не главным потоком",
+            "(другие процессы машины, бот, база данных, прерывания, steal - время, которое забрал гипервизор VPS;",
+            "паузы GC самого сервера не считаются). Если две проверки подряд это больше foreign-load-threshold,",
+            "главный поток переезжает на свободное резервное ядро, а старое ядро tick становится резервом. Хватает",
+            "и всплеска чуть дольше секунды на стыке двух проверок. Тяжёлый тик это легче не делает:",
+            "помогает только против чужой нагрузки на ядре. Текущее состояние показывает /amazake cores.");
+        final int reserveCount = reserveCount("cpu.reserve.count",
+            "Сколько ядер держать в резерве. auto: 1, если серверу доступно 6 ядер и больше, иначе 0.",
+            "На 3 ядрах auto даёт 0: лишнего ядра нет, резерв отнял бы единственное ядро у фона и сети.",
+            "Можно задать 1 вручную: тогда чанки, GC, сеть и фон делят одно ядро. Ядра резерва берутся только",
+            "у background (никогда у tick и chunks и не со второго потока SMT ядра tick; поэтому на 6 ядрах с SMT",
+            "auto даёт 0).");
+        final int reserveCheck = Math.min(60, Math.max(1, integer("cpu.reserve.check-seconds", 2,
+            "Как часто проверять ядро tick, в секундах (от 1 до 60).")));
+        final double reserveThreshold = Math.min(1.0, Math.max(0.05, decimal("cpu.reserve.foreign-load-threshold", 0.25,
+            "Какая чужая нагрузка на ядре tick считается помехой, в долях ядра: 0.25 - четверть ядра.")));
+        final int reserveCooldown = Math.max(0, integer("cpu.reserve.cooldown-seconds", 30,
+            "После переезда следующий - не раньше чем через столько секунд."));
+        cpuReserve = new Cores.Reserve(reserveCount, reserveEnabled, reserveCheck, reserveThreshold, reserveCooldown);
+
         try {
             yaml.save(file);
         } catch (final IOException e) {
             LOGGER.log(Level.WARNING, "Could not write " + file, e);
         }
         LOGGER.info("Loaded " + file.getName());
-        Cores.configure(cpuLayoutEnabled, cpuLayoutRoles, cpuLayoutResizeChunkPool, cpuLayoutIgnoreProcessorCount);
+        Cores.configure(cpuLayoutEnabled, cpuLayoutRoles, cpuLayoutResizeChunkPool, cpuLayoutIgnoreProcessorCount, cpuReserve);
         return true;
     }
 
@@ -158,6 +183,38 @@ public final class AmazakeConfig {
         }
         yaml.setComments(path, List.of(comment));
         return yaml.getInt(path, def);
+    }
+
+    /** A number setting; an int in the file (YAML "1") is read as a number too. */
+    private static double decimal(final String path, final double def, final String... comment) {
+        final Object value = yaml.get(path);
+        double out = def;
+        if (value instanceof Number number && Double.isFinite(number.doubleValue())) {
+            out = number.doubleValue();
+        } else {
+            yaml.set(path, def);
+        }
+        yaml.setComments(path, List.of(comment));
+        return out;
+    }
+
+    /** cpu.reserve.count: "auto" ({@link LayoutPlanner#AUTO_RESERVE}) or a number of CPUs, at least 0. */
+    private static int reserveCount(final String path, final String... comment) {
+        final Object value = yaml.get(path);
+        int out = LayoutPlanner.AUTO_RESERVE;
+        if (value instanceof Number number) {
+            out = Math.max(0, number.intValue());
+        } else if (value instanceof String text && !text.isBlank() && !text.trim().equalsIgnoreCase("auto")) {
+            try {
+                out = Math.max(0, Integer.parseInt(text.trim()));
+            } catch (final NumberFormatException e) {
+                LOGGER.warning(path + ": \"" + text.trim() + "\" - не число и не auto, взято auto.");
+            }
+        } else if (!(value instanceof String text && text.trim().equalsIgnoreCase("auto"))) {
+            yaml.set(path, "auto");
+        }
+        yaml.setComments(path, List.of(comment));
+        return out;
     }
 
     private static String string(final String path, final String def, final String... comment) {

@@ -28,7 +28,8 @@ Rules:
   "samples": [ ... ],
   "threads": [ ... ],
   "groups": [ ... ],
-  "lagSpikes": [ ... ]
+  "lagSpikes": [ ... ],
+  "migrations": [ ... ]
 }
 ```
 
@@ -39,6 +40,7 @@ Rules:
 | `createdAt` | string | ISO-8601 UTC instant the measurement started |
 | `durationMs` | int | How long it measured |
 | `intervalMs` | int | Time between two samples (default 1000) |
+| `migrations` | object[], *optional* | Moves of the main thread to a reserve core during the measurement, oldest first; see [`migrations[]`](#migrations). Absent when there were none |
 
 ## `server`
 
@@ -68,7 +70,7 @@ Rules:
 | `heapMaxBytes` | long | `-Xmx` |
 | `perCore` | bool | Whether `samples[].cores` holds per-core loads (Linux `/proc/stat`); false elsewhere |
 | `perThreadSource` | string | `"proc"` (Linux `/proc/self/task`: JVM-internal threads such as GC and JIT included) or `"jmx"` (Java threads only) |
-| `coreRoles` | string[], *optional* | The core layout's job of each logical core, one per entry of `samples[].cores` and in the same order (the N of `cpuN` in `/proc/stat`). Values: `tick` (main thread), `chunks` (chunk workers and chunk I/O), `network` (Netty), `gc` (GC, JIT, VM threads; stop-the-world GC workers run on every core during a pause), `background` (all other threads); several roles on one core are joined with `+` in this order, e.g. `chunks+gc` and `network+background` (the automatic layouts for 2 to 4 cores always combine roles); `shared` means no role: an idle core (the tick core's SMT sibling) or one outside the CPUs the server may use. Readers should split on `+` and treat unknown names as `shared`. Present only when `perCore` and a core layout (`amazake.yml` `cpu.layout`) is active |
+| `coreRoles` | string[], *optional* | The core layout's job of each logical core, one per entry of `samples[].cores` and in the same order (the N of `cpuN` in `/proc/stat`). Values: `tick` (main thread), `chunks` (chunk workers and chunk I/O), `network` (Netty), `gc` (GC, JIT, VM threads; stop-the-world GC workers run on every core but the reserve during a pause), `background` (all other threads), `reserve` (a reserve core: kept empty, no thread of the server runs there; the main thread moves to it when its own core is busy with foreign load, see `migrations`); several roles on one core are joined with `+` in this order, e.g. `chunks+gc` and `network+background` (the automatic layouts for 2 to 4 cores always combine roles); `shared` means no role: an idle core (the tick core's SMT sibling) or one outside the CPUs the server may use. `reserve` is never combined with another role. Readers should split on `+` and treat unknown names as `shared`. The roles are those at the end of the measurement: after a move the old tick core is `reserve` and the reserve core it moved to is `tick`. Present only when `perCore` and a core layout (`amazake.yml` `cpu.layout`) is active |
 
 ## `samples[]`
 
@@ -140,6 +142,20 @@ Ticks that took longer than 50 ms, at most 200, longest first.
 |---|---|---|
 | `t` | int | Milliseconds since the start (sample resolution) |
 | `ms` | number | Tick duration |
+
+## `migrations[]`
+
+*Optional* (added in version 1; older reports and readers simply lack it). Each entry is one move of the main
+thread to a reserve core (`amazake.yml` `cpu.reserve`): its core was busy with work that was not the main thread
+(other processes, interrupts, time stolen by the hypervisor) above the threshold on two checks in a row, so the
+tick moved to an idle reserve core and its old core became the reserve.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `t` | int | Milliseconds since the start of the measurement (the same clock as `samples[].t`) |
+| `from` | int | The old tick core: the N of `cpuN`, the same numbering as `coreRoles` and `samples[].cores` |
+| `to` | int | The new tick core (a reserve core until then) |
+| `foreignLoad` | number | Load on `from` that was not the main thread, over the last check, as a fraction of one core (0..1, steal included) |
 
 ## Upload API (site)
 
