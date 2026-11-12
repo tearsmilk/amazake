@@ -465,11 +465,17 @@ public final class AffinityManager {
             }
             quiet.put(cpu, idleSiblings);
         }
+        // Linux gives a thread its creator's name until it sets its own, so a native thread started from the
+        // main thread is also "Server thread". The real one is the busiest of them.
         PinnedThread main = null;
+        long mainTicks = -1L;
         for (final PinnedThread thread : this.snapshot) {
             if (thread.role() == Role.TICK) {
-                main = thread;
-                break;
+                final long ticks = ContentionDetector.cpuTicks(this.readStat(thread.tid()));
+                if (main == null || ticks > mainTicks) {
+                    main = thread;
+                    mainTicks = ticks;
+                }
             }
         }
         final long ownTicks;

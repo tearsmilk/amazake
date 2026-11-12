@@ -103,7 +103,7 @@ if [ "$cpus" -ge 2 ]; then
   check 'Раскладка ядер включена: tick=\[' "/amazake cores says the layout is on"
   check '[[:space:]]0  tick[[:space:]]+[0-9]+%' "/amazake cores prints the core -> role table with the load"
   check 'Потоки по группам' "/amazake cores lists where the thread groups run"
-  check 'main \(tick\): 1 -> \[' "/amazake cores shows the main thread on the tick core"
+  check 'main \(tick\): [0-9]+ -> \[[0-9]+\]([^,]|$)' "/amazake cores shows the main thread on the tick core"
   # cpu.reserve is on by default: either reserve CPUs (auto: from 6 CPUs) or the reason there are none.
   check 'Резерв: (ядра \[[0-9,-]+\] пустые|нет \()' "/amazake cores prints the reserve line"
 else
