@@ -30,7 +30,8 @@ Rules:
   "groups": [ ... ],
   "lagSpikes": [ ... ],
   "migrations": [ ... ],
-  "entities": { ... }
+  "entities": { ... },
+  "plugins": { ... }
 }
 ```
 
@@ -43,6 +44,7 @@ Rules:
 | `intervalMs` | int | Time between two samples (default 1000) |
 | `migrations` | object[], *optional* | Moves of the main thread to a reserve core during the measurement, oldest first; see [`migrations[]`](#migrations). Absent when there were none |
 | `entities` | object, *optional* | Where the entity tick time went: mobs vs other entities vs players, by entity type and by phase; see [`entities`](#entities). Only Amazake writes it (its server counts it); absent on other servers and with `amazake.yml` `profiler.entity-breakdown: false` |
+| `plugins` | object, *optional* | Each plugin's work on the main thread (scheduler tasks, event listeners, commands; ms per tick) and its async scheduler CPU; see [`plugins`](#plugins). Only Amazake writes it; absent with `amazake.yml` `profiler.plugin-breakdown: false` |
 
 ## `server`
 
@@ -72,7 +74,7 @@ Rules:
 | `heapMaxBytes` | long | `-Xmx` |
 | `perCore` | bool | Whether `samples[].cores` holds per-core loads (Linux `/proc/stat`); false elsewhere |
 | `perThreadSource` | string | `"proc"` (Linux `/proc/self/task`: JVM-internal threads such as GC and JIT included) or `"jmx"` (Java threads only) |
-| `coreRoles` | string[], *optional* | The core layout's job of each logical core, one per entry of `samples[].cores` and in the same order (the N of `cpuN` in `/proc/stat`). Values: `tick` (main thread), `chunks` (chunk workers and chunk I/O), `network` (Netty), `gc` (GC, JIT, VM threads; stop-the-world GC workers run on every core but the reserve during a pause), `background` (all other threads), `reserve` (a reserve core: kept empty, no thread of the server runs there; the main thread moves to it when its own core is busy with foreign load, see `migrations`); several roles on one core are joined with `+` in this order, e.g. `chunks+gc` and `network+background` (the automatic layouts for 2 to 4 cores always combine roles); `shared` means no role: an idle core (the tick core's SMT sibling) or one outside the CPUs the server may use. `reserve` is never combined with another role. Readers should split on `+` and treat unknown names as `shared`. The roles are those at the end of the measurement: after a move the old tick core is `reserve` and the reserve core it moved to is `tick`. Present only when `perCore` and a core layout (`amazake.yml` `cpu.layout`) is active |
+| `coreRoles` | string[], *optional* | The core layout's job of each logical core, one per entry of `samples[].cores` and in the same order (the N of `cpuN` in `/proc/stat`). Values: `tick` (main thread), `chunks` (chunk workers and chunk I/O), `network` (Netty), `gc` (GC, JIT, VM threads; stop-the-world GC workers run on every core but the reserve during a pause), `plugins` (plugin threads: the Bukkit and Folia async schedulers, async chat, tab completion, login and configuration pools that run plugin listeners, and threads plugins create themselves; they may also run on the `background` cores, with priority there), `background` (all other threads, the "support" core), `reserve` (a reserve core: kept empty, no thread of the server runs there; the main thread moves to it when its own core is busy with foreign load, see `migrations`); several roles on one core are joined with `+` in this order, e.g. `chunks+gc` and `network+background` (the automatic layouts for 2 to 4 cores always combine roles); `shared` means no role: an idle core (the tick core's SMT sibling) or one outside the CPUs the server may use. `reserve` is never combined with another role. Readers should split on `+` and treat unknown names as `shared`. The roles are those at the end of the measurement: after a move the old tick core is `reserve` and the reserve core it moved to is `tick`. Present only when `perCore` and a core layout (`amazake.yml` `cpu.layout`) is active |
 
 ## `samples[]`
 
@@ -94,6 +96,7 @@ One per interval, in time order.
 | `entities` | int, *optional* | All loaded entities, all worlds |
 | `loadedChunks` | int, *optional* | All loaded chunks, all worlds |
 | `entityTicks` | object, *optional* | Entity tick time in this interval, ms per tick: `{"loop": 210.4, "mob": 120.2, "other": 80.1, "player": 0.2}` (the four keys of [`entities.msPerTick`](#entities) `loop` and of the classes). Absent when the report has no top-level `entities`, or when the main thread did not answer for this interval (the next sample then covers both intervals) |
+| `pluginTicks` | number, *optional* | Main-thread time of all plugins in this interval, ms per tick (the sum of [`plugins`](#plugins) `msPerTick` for the interval). Absent when the report has no `plugins`, or when the main thread did not answer for this interval |
 
 ## `threads[]`
 
@@ -234,6 +237,45 @@ Readers keep unknown phase names (show them as they are) and treat a missing pha
 
 The AmazakeStress plugin writes the same object (when it runs on Amazake) at the top level of its report and,
 per stage, as `stress.stageResults[].entities`. (Per-sample objects are `samples[].entityTicks`: `samples[].entities` is the loaded entity count.)
+
+## `plugins`
+
+*Optional* (added in version 1). Plugins' code that touches the world runs on the main thread (Bukkit's
+rule: no data races); Amazake's server measures it, per plugin, only while a measurement asks for it. Three
+kinds of main-thread work are timed, each as **self time** (a plugin's listener fired from inside another
+plugin's task is charged to the listener's plugin, not twice):
+
+- `tasks`: sync scheduler tasks (`runTask`, `runTaskTimer`, `callSyncMethod`, the main-thread executor), Folia
+  global/region tasks and entity tasks;
+- `events`: listeners of synchronous events;
+- `commands`: the plugin's command executors (Bukkit `PluginCommand`s).
+
+Off the main thread, `asyncCpuMsPerSecond` is the CPU time of the plugin's async scheduler tasks (Bukkit
+`runTaskAsynchronously` and Folia `AsyncScheduler`), measured per task on its thread.
+
+```json
+"plugins": {
+  "ticks": 600,
+  "msPerTick": 3.42,
+  "plugins": [
+    { "name": "AmazakeStress", "msPerTick": 2.91, "tasks": 2.80, "events": 0.11, "commands": 0.0,
+      "callsPerTick": 104.2, "asyncCpuMsPerSecond": 270.5 },
+    { "name": "LuckPerms", "msPerTick": 0.31, "tasks": 0.02, "events": 0.29, "commands": 0.0,
+      "callsPerTick": 3.1, "asyncCpuMsPerSecond": 4.0 }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `ticks` | int | Server ticks the numbers cover |
+| `msPerTick` | number | All plugins' main-thread time, ms per tick |
+| `plugins[]` | object[] | Every plugin that did any measured work, most main-thread time first, at most 50 |
+| `plugins[].name` | string | Plugin name |
+| `plugins[].msPerTick` | number | `tasks` + `events` + `commands` |
+| `plugins[].tasks`, `events`, `commands` | number | ms per tick of each kind |
+| `plugins[].callsPerTick` | number | Timed calls (tasks run + listener calls + commands) per tick |
+| `plugins[].asyncCpuMsPerSecond` | number | CPU ms per wall-clock second used by the plugin's async scheduler tasks (1000 = one core busy) |
 
 ## Upload API (site)
 
