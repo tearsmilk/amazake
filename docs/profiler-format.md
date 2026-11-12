@@ -29,7 +29,8 @@ Rules:
   "threads": [ ... ],
   "groups": [ ... ],
   "lagSpikes": [ ... ],
-  "migrations": [ ... ]
+  "migrations": [ ... ],
+  "entities": { ... }
 }
 ```
 
@@ -41,6 +42,7 @@ Rules:
 | `durationMs` | int | How long it measured |
 | `intervalMs` | int | Time between two samples (default 1000) |
 | `migrations` | object[], *optional* | Moves of the main thread to a reserve core during the measurement, oldest first; see [`migrations[]`](#migrations). Absent when there were none |
+| `entities` | object, *optional* | Where the entity tick time went: mobs vs other entities vs players, by entity type and by phase; see [`entities`](#entities). Only Amazake writes it (its server counts it); absent on other servers and with `amazake.yml` `profiler.entity-breakdown: false` |
 
 ## `server`
 
@@ -91,6 +93,7 @@ One per interval, in time order.
 | `players` | int | Online players |
 | `entities` | int, *optional* | All loaded entities, all worlds |
 | `loadedChunks` | int, *optional* | All loaded chunks, all worlds |
+| `entities` | object, *optional* | Entity tick time in this interval, ms per tick: `{"loop": 210.4, "mob": 120.2, "other": 80.1, "player": 0.2}` (the four keys of [`entities.msPerTick`](#entities) `loop` and of the classes). Absent when the report has no top-level `entities`, or when the main thread did not answer for this interval (the next sample then covers both intervals) |
 
 ## `threads[]`
 
@@ -156,6 +159,81 @@ tick moved to an idle reserve core and its old core became the reserve.
 | `from` | int | The old tick core: the N of `cpuN`, the same numbering as `coreRoles` and `samples[].cores` |
 | `to` | int | The new tick core (a reserve core until then) |
 | `foreignLoad` | number | Load on `from` that was not the main thread, over the last check, as a fraction of one core (0..1, steal included) |
+
+## `entities`
+
+*Optional* (added in version 1). Amazake's server times every entity tick, but only while a measurement asks
+for it, so it costs nothing otherwise. The `entities` sections of all worlds (`ServerLevel#tick`, from the
+dragon fight to just before block entities) make the **loop**. Inside it each ticked entity is one of three
+**classes**:
+
+- `mob`: a `net.minecraft.world.entity.Mob`, everything with AI: zombies, villagers, animals, bees, piglins, the dragon.
+- `other`: every other non-player entity: items, XP orbs, falling blocks, arrows, minecarts, armor stands, displays.
+- `player`: `Player`. Only their light `tick()` runs here; the heavy part (`doTick`) runs with the network, outside the loop.
+
+Each entity's own time (`tick`/`postTick`, or `inactiveTick` when the entity activation range made it
+inactive; its passengers are timed separately) is split into **phases**. A phase's time is **self time**:
+a phase nested inside another (pathfinding inside goals, `move` inside `travel`) is not counted twice.
+
+| Phase | What runs there |
+|---|---|
+| `base` | Everything of the entity's tick that no phase below covers (`baseTick`, fire, effects, equipment, age, ...) |
+| `goals` | `Mob#serverAiStep`: the target and goal selectors (`canUse`, `tick` of goals, their entity searches and line-of-sight checks) |
+| `brain` | `customServerAiStep`: brain behaviours of villagers, piglins and other brain mobs, villager trades and gossip |
+| `sensors` | `Brain#tick` sensors (nearest entities, items, POI, beds, ...) |
+| `pathfind` | Building a path: `PathFinder#findPath` (A*), wherever it is called from |
+| `navigation` | Following a path: `PathNavigation#tick` |
+| `travel` | `LivingEntity#travel`: movement physics of living entities, without `move` |
+| `move` | `Entity#move`: collisions with blocks and entities, stepping, landing |
+| `push` | `LivingEntity#pushEntities`: entity cramming and pushing |
+| `loot` | `Mob#aiStep` item pick-up search (zombies, skeletons, piglins, villagers) |
+| `fluids` | Water and lava checks and pushing (`updateInWaterStateAndDoFluidPushing`) |
+| `merge` | Item and XP orb merging (`ItemEntity#mergeWithNeighbours`, `ExperienceOrb#scanForMerges`) |
+| `inactive` | `inactiveTick()` of entities outside the activation range, without the phases nested in it |
+
+Readers keep unknown phase names (show them as they are) and treat a missing phase as 0.
+
+```json
+"entities": {
+  "ticks": 600,
+  "phases": ["base", "goals", "brain", "sensors", "pathfind", "navigation", "travel", "move", "push",
+             "loot", "fluids", "merge", "inactive"],
+  "msPerTick": { "loop": 210.4, "ear": 1.2, "despawn": 0.8, "overhead": 3.1 },
+  "classes": [
+    { "class": "mob", "msPerTick": 120.2, "entitiesPerTick": 1180.0, "inactiveShare": 0.05,
+      "phases": { "base": 10.1, "goals": 30.4, "brain": 18.0, "sensors": 9.2, "pathfind": 12.5,
+                  "navigation": 3.3, "travel": 6.0, "move": 14.1, "push": 11.2, "loot": 2.0, "fluids": 3.4 } },
+    { "class": "other", "msPerTick": 80.1, "entitiesPerTick": 52000.0, "inactiveShare": 0.6, "phases": { ... } },
+    { "class": "player", "msPerTick": 0.2, "entitiesPerTick": 1.0, "inactiveShare": 0.0, "phases": { ... } }
+  ],
+  "types": [
+    { "type": "minecraft:villager", "class": "mob", "msPerTick": 40.3, "entitiesPerTick": 120.0,
+      "usPerEntity": 335.8, "inactiveShare": 0.0, "phases": { "brain": 15.0, "sensors": 8.1, ... } }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `ticks` | int | Server ticks the numbers cover. Every value below is **milliseconds per tick** (sum over the measurement / `ticks`) unless named otherwise |
+| `phases` | string[] | The phase names in display order |
+| `msPerTick.loop` | number | The whole entities sections of all worlds |
+| `msPerTick.ear` | number | Entity activation range (`ActivationRange.activateEntities`), once per world per tick |
+| `msPerTick.despawn` | number | `checkDespawn` of all entities |
+| `msPerTick.overhead` | number | `loop` − `ear` − `despawn` − all classes: iteration, activation checks, chunk tasks run between entities, the dragon fight |
+| `classes[]` | object[] | Always the three classes in the order `mob`, `other`, `player` (a class with nothing ticked has zeros) |
+| `classes[].msPerTick` | number | Time of the class's entities (sum of its phases) |
+| `classes[].entitiesPerTick` | number | Entity ticks of the class / `ticks`: how many entities of it ticked per tick on average |
+| `classes[].inactiveShare` | number | 0..1, share of those entity ticks that were `inactiveTick` |
+| `classes[].phases` | `{phase: ms}` | Per phase; phases with 0 may be left out |
+| `types[]` | object[] | The most expensive entity types by `msPerTick`, at most 40, most first |
+| `types[].type` | string | Registry id, e.g. `minecraft:zombie` |
+| `types[].class` | string | `mob`, `other` or `player` |
+| `types[].usPerEntity` | number | Microseconds per entity tick (`msPerTick * 1000 / entitiesPerTick`) |
+| `types[].msPerTick`, `entitiesPerTick`, `inactiveShare`, `phases` | | As in `classes[]` |
+
+The AmazakeStress plugin writes the same object (when it runs on Amazake) at the top level of its report and,
+per stage, as `stress.stageResults[].entities`.
 
 ## Upload API (site)
 
