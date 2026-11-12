@@ -93,7 +93,7 @@ One per interval, in time order.
 | `players` | int | Online players |
 | `entities` | int, *optional* | All loaded entities, all worlds |
 | `loadedChunks` | int, *optional* | All loaded chunks, all worlds |
-| `entities` | object, *optional* | Entity tick time in this interval, ms per tick: `{"loop": 210.4, "mob": 120.2, "other": 80.1, "player": 0.2}` (the four keys of [`entities.msPerTick`](#entities) `loop` and of the classes). Absent when the report has no top-level `entities`, or when the main thread did not answer for this interval (the next sample then covers both intervals) |
+| `entityTicks` | object, *optional* | Entity tick time in this interval, ms per tick: `{"loop": 210.4, "mob": 120.2, "other": 80.1, "player": 0.2}` (the four keys of [`entities.msPerTick`](#entities) `loop` and of the classes). Absent when the report has no top-level `entities`, or when the main thread did not answer for this interval (the next sample then covers both intervals) |
 
 ## `threads[]`
 
@@ -233,7 +233,7 @@ Readers keep unknown phase names (show them as they are) and treat a missing pha
 | `types[].msPerTick`, `entitiesPerTick`, `inactiveShare`, `phases` | | As in `classes[]` |
 
 The AmazakeStress plugin writes the same object (when it runs on Amazake) at the top level of its report and,
-per stage, as `stress.stageResults[].entities`.
+per stage, as `stress.stageResults[].entities`. (Per-sample objects are `samples[].entityTicks`: `samples[].entities` is the loaded entity count.)
 
 ## Upload API (site)
 
