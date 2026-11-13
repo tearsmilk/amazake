@@ -49,6 +49,21 @@ jobs:
           export BUILD_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           ./gradlew createMojmapPaperclipJar --stacktrace --no-daemon
 
+      - name: Unit tests (Amazake's own and the built-in systems)
+        run: ./gradlew :amazake-server:test --tests 'ink.hoka.amazake.AmazakeTestSuite' :amazake-server:testAmazakeTab --stacktrace --no-daemon
+
+      - name: The systems API jar and the built-in systems
+        run: |
+          ./gradlew :amazake-server:systemsApiJar --stacktrace --no-daemon
+          ls -l amazake-server/build/libs/amazake-systems-api-*.jar
+          unzip -l "$(ls amazake-server/build/libs/amazake-systems-api-*.jar | grep -v -- '-sources\.jar$')"
+          # AmazakeTab ships as a resource (systems/AmazakeTab.azs) and must not be on the server's own classpath.
+          server=$(ls amazake-server/build/libs/amazake-server-*.jar)
+          unzip -l "$server" systems/AmazakeTab.azs
+          if unzip -l "$server" | grep -q 'ink/hoka/amazake/systems/tab/'; then
+            echo "AmazakeTab classes are on the server classpath"; exit 1
+          fi
+
       - name: The jar says it is Amazake
         run: |
           jar=$(ls amazake-server/build/libs/amazake-paperclip-*-mojmap.jar)
@@ -74,6 +89,13 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          name: amazake-systems-api-${{ github.run_number }}
+          path: amazake-server/build/libs/amazake-systems-api-*.jar
+          if-no-files-found: error
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
           name: amazake-stress-${{ github.run_number }}
           path: stress-plugin/build/libs/AmazakeStress-*.jar
           if-no-files-found: error
@@ -90,7 +112,12 @@ jobs:
           # The stress plugin rides along: AmazakeStress-<version>.jar runs on any Paper 1.21.11 fork (Leaf too).
           stress=$(ls stress-plugin/build/libs/AmazakeStress-*.jar)
           cp "$stress" .
-          gh release create "build-${{ github.run_number }}" "$name" "$(basename "$stress")" \
+          # The API for writing Amazake systems (.azs), with its sources.
+          api="amazake-systems-api-1.21.11-${{ github.run_number }}.jar"
+          api_sources="amazake-systems-api-1.21.11-${{ github.run_number }}-sources.jar"
+          cp "$(ls amazake-server/build/libs/amazake-systems-api-*.jar | grep -v -- '-sources\.jar$')" "$api"
+          cp amazake-server/build/libs/amazake-systems-api-*-sources.jar "$api_sources"
+          gh release create "build-${{ github.run_number }}" "$name" "$(basename "$stress")" "$api" "$api_sources" \
             --target "$GITHUB_SHA" \
             --title "Amazake 1.21.11 #${{ github.run_number }}" \
             --notes "Built from ${GITHUB_SHA::7}: $(git log -1 --format=%s)" \

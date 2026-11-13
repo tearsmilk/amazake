@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Starts the built server once, runs a few commands and checks it answers as Amazake, then runs a short
+# Starts the built server once, runs a few commands and checks it answers as Amazake, enables, reloads and
+# disables the built-in AmazakeTab system (AmazakeSystems) at runtime, then runs a short
 # /amazake profile against the profiler site's backend (web/server) and fetches the report back.
 # With the AmazakeStress plugin jar as second argument, the server starts with the plugin and also runs
 # "/stress run 40" with tiny intensities (scripts/stress-smoke-config.yml): the stages must advance, no
@@ -30,6 +31,9 @@ if [ -n "$stress_jar" ]; then
   sed -E "s|^([[:space:]]*upload-url:).*|\1 \"http://127.0.0.1:$site_port\"|" \
     "$repo/scripts/stress-smoke-config.yml" > plugins/AmazakeStress/config.yml
 fi
+# systems.yml lists Ghost, a system with no .azs file: wanted but never running. Toggling AmazakeTab must keep it.
+mkdir -p systems
+printf 'enabled:\n  - Ghost\n' > systems/systems.yml
 mkfifo input
 # Keep the fifo open for writing so the server never sees end-of-input.
 exec 3<>input
@@ -58,6 +62,18 @@ send "amazake profile 5" 15
 # The /amazake profile link, taken now: the stress run below uploads a second report.
 amazake_id=$(grep -oE "127\.0\.0\.1:$site_port/r/[A-Za-z0-9]+" server.log | tail -1 | sed 's|.*/r/||' || true)
 
+# AmazakeSystems: the built-in AmazakeTab is extracted disabled, /pl lists it, and it is enabled, reloaded and
+# disabled at runtime; it ends enabled so the stop below goes through the shutdown path with a running system.
+send "pl"
+send "amazake systems"
+send "amazake system enable AmazakeTab"
+tab_config=no
+[ -f systems/AmazakeTab/config.yml ] && tab_config=yes
+send "amazake system reload AmazakeTab"
+send "amazake system disable AmazakeTab"
+state_after_disable=$(cat systems/systems.yml 2>/dev/null || true)
+send "amazake system enable AmazakeTab"
+
 stress_from=0
 if [ -n "$stress_jar" ]; then
   stress_from=$(wc -l < server.log)
@@ -82,6 +98,12 @@ if [ -n "$stress_jar" ]; then
   done
   send "stress status" 2
 fi
+# Bukkit /reload (bukkit:reload; the bare "reload" is the vanilla data pack reload): the systems are disabled
+# before the plugins and commands are cleared, then enabled again from systems.yml; /amazake (re-registered by the
+# reload) must list AmazakeTab as enabled afterwards.
+reload_from=$(wc -l < server.log)
+send "bukkit:reload confirm" 20
+send "amazake systems"
 send "stop" 0
 wait "$pid" || true
 cat server.log
@@ -104,6 +126,51 @@ else
   echo "ok: no Paper download or onboarding message"
 fi
 if [ -f amazake.yml ]; then echo "ok: amazake.yml written"; cat amazake.yml; else echo "MISSING: amazake.yml"; fail=1; fi
+
+echo "---- AmazakeSystems ----"
+ls -la systems systems/AmazakeTab 2>/dev/null || true
+if [ -f systems/AmazakeTab.azs ] && grep -qx 'AmazakeTab' systems/.installed 2>/dev/null; then
+  echo "ok: systems/ holds the built-in AmazakeTab.azs and .installed lists it"
+else
+  echo "MISSING: systems/AmazakeTab.azs or its line in systems/.installed"; fail=1
+fi
+check 'AmazakeTab распакована в systems/AmazakeTab\.azs' "the built-in system is extracted at the first start"
+check 'AmazakeSystems \(1\):' "/pl has the AmazakeSystems section"
+check '^\[[0-9:]+ INFO\]: .*- .*AmazakeTab' "/pl lists AmazakeTab"
+check 'AmazakeTab .*1\.[0-9.]+ .*выключена' "/amazake systems lists AmazakeTab as disabled at first"
+check 'Система AmazakeTab [0-9.]+ включена' "/amazake system enable AmazakeTab"
+if [ "$tab_config" = yes ]; then echo "ok: systems/AmazakeTab/config.yml written on enable"; else echo "MISSING: systems/AmazakeTab/config.yml after enable"; fail=1; fi
+check 'Система AmazakeTab перезагружена' "/amazake system reload AmazakeTab"
+check 'Система AmazakeTab выключена' "/amazake system disable AmazakeTab"
+check 'включена система Ghost, но её \.azs-файла' "a listed system without its file is reported at startup"
+if printf '%s\n' "$state_after_disable" | grep -qE '^[[:space:]]*- Ghost$' \
+  && ! printf '%s\n' "$state_after_disable" | grep -qE '^[[:space:]]*- AmazakeTab$'; then
+  echo "ok: systems.yml drops AmazakeTab after disable and keeps Ghost (listed, not running)"
+else
+  echo "MISSING: systems.yml with Ghost only after disable"; printf '%s\n' "$state_after_disable"; fail=1
+fi
+if grep -qE '^[[:space:]]*- AmazakeTab$' systems/systems.yml 2>/dev/null && grep -qE '^[[:space:]]*- Ghost$' systems/systems.yml; then
+  echo "ok: systems.yml lists AmazakeTab and Ghost after the last enable (kept through /reload and the stop)"
+else
+  echo "MISSING: AmazakeTab and Ghost in systems.yml"; cat systems/systems.yml 2>/dev/null || true; fail=1
+fi
+echo "---- /reload ----"
+tail -n "+$((reload_from + 1))" server.log > reload.log
+reload_check() { if grep -qE "$1" reload.log; then echo "ok: $2"; else echo "MISSING: $2"; fail=1; fi; }
+# disabled -> found again -> enabled again, in this order, before the stop.
+if awk '/Системы: система AmazakeTab выключена\./ && !d {d=NR} /Системы: найдено [0-9]+, включены: AmazakeTab/ && d && !s {s=NR}
+        END {exit !(d && s)}' reload.log; then
+  echo "ok: /reload disables AmazakeTab, then enables it again from systems.yml"
+else
+  echo "MISSING: AmazakeTab disabled and enabled again by /reload"; fail=1
+fi
+reload_check 'Системы: система AmazakeTab [0-9.]+ включена\.' "AmazakeTab enabled after /reload"
+reload_check 'AmazakeTab .*1\.[0-9.]+ .*включена' "/amazake systems after /reload lists AmazakeTab as enabled"
+if grep -nE 'at ink\.hoka\.amazake\.systems|Не удалось включить систему|ошибка при (выключении|перезагрузке) системы' server.log; then
+  echo "FOUND: an exception or error from AmazakeSystems"; fail=1
+else
+  echo "ok: no exception from AmazakeSystems"
+fi
 
 # The core layout: one English line at startup (and on reload), and the /amazake cores table.
 echo "---- core layout ($cpus CPUs) ----"

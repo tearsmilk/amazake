@@ -1,0 +1,53 @@
+--- a/src/main/java/io/papermc/paper/command/PaperPluginsCommand.java
++++ b/src/main/java/io/papermc/paper/command/PaperPluginsCommand.java
+@@ -119,6 +119,26 @@
+         return builder.build();
+     }
+ 
++    // Amazake start - systems in /pl
++    private static Component formatSystem(final ink.hoka.amazake.systems.SystemManager.Overview system) {
++        final TextComponent.Builder hover = Component.text()
++            .append(Component.text(system.name() + " " + system.version(), NamedTextColor.WHITE))
++            .append(Component.newline())
++            .append(Component.text(system.enabled() ? "Система ядра Amazake, включена" : "Система ядра Amazake, выключена",
++                system.enabled() ? NamedTextColor.GREEN : NamedTextColor.RED));
++        if (!system.description().isEmpty()) {
++            hover.append(Component.newline()).append(Component.text(system.description(), NamedTextColor.GRAY));
++        }
++        if (!system.authors().isEmpty()) {
++            hover.append(Component.newline()).append(Component.text("Авторы: " + String.join(", ", system.authors()), NamedTextColor.GRAY));
++        }
++        hover.append(Component.newline()).append(Component.text("/amazake system info " + system.name(), NamedTextColor.DARK_GRAY));
++        return Component.text(system.name(), system.enabled() ? NamedTextColor.GREEN : NamedTextColor.RED)
++            .hoverEvent(hover.build())
++            .clickEvent(ClickEvent.suggestCommand("/amazake system info " + system.name()));
++    }
++    // Amazake end - systems in /pl
++
+     private static Component header(final String header, final int color, final int count, final boolean showSize) {
+         final TextComponent.Builder componentHeader = Component.text().color(TextColor.color(color))
+             .append(Component.text(header));
+@@ -210,6 +230,23 @@
+             sender.sendMessage(component);
+         }
+ 
++        // Amazake start - systems in /pl
++        final List<ink.hoka.amazake.systems.SystemManager.Overview> amazakeSystems = ink.hoka.amazake.systems.SystemManager.overview();
++        if (!amazakeSystems.isEmpty()) {
++            sender.sendMessage(header("AmazakeSystems", 0xDC143C, amazakeSystems.size(), true));
++            final List<Component> systemNames = new ArrayList<>(amazakeSystems.size());
++            for (final ink.hoka.amazake.systems.SystemManager.Overview system : amazakeSystems) {
++                systemNames.add(formatSystem(system));
++            }
++            boolean firstLine = true;
++            for (final List<Component> line : Lists.partition(systemNames, 10)) {
++                final Component start = firstLine ? Component.space().append(PLUGIN_TICK) : PLUGIN_TICK_EMPTY;
++                firstLine = false;
++                sender.sendMessage(start.append(Component.join(JoinConfiguration.commas(true), line)));
++            }
++        }
++        // Amazake end - systems in /pl
++
+         return Command.SINGLE_SUCCESS;
+     }
+ }

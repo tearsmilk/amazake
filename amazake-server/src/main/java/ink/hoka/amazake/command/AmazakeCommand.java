@@ -5,6 +5,7 @@ import ink.hoka.amazake.AmazakeConfig;
 import ink.hoka.amazake.cpu.Cores;
 import ink.hoka.amazake.cpu.ProcStat;
 import ink.hoka.amazake.profiler.Profiler;
+import ink.hoka.amazake.systems.SystemManager;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -20,19 +21,20 @@ import static net.kyori.adventure.text.format.NamedTextColor.GRAY;
 import static net.kyori.adventure.text.format.NamedTextColor.GREEN;
 import static net.kyori.adventure.text.format.NamedTextColor.RED;
 
-/** /amazake: version, reload, profile, cores. */
+/** /amazake: version, reload, profile, cores, systems. */
 public final class AmazakeCommand extends Command {
 
     private static final String RELOAD_PERMISSION = "amazake.command.reload";
     private static final String PROFILE_PERMISSION = "amazake.command.profile";
     private static final String CORES_PERMISSION = "amazake.command.cores";
-    private static final List<String> SUBCOMMANDS = List.of("version", "reload", "profile", "cores");
+    private static final String SYSTEMS_PERMISSION = SystemManager.PERMISSION;
+    private static final List<String> SUBCOMMANDS = List.of("version", "reload", "profile", "cores", "systems", "system");
     private static final List<String> PROFILE_ARGUMENTS = List.of("stop", "30", "60", "300");
 
     public AmazakeCommand(final String name) {
         super(name);
         this.description = "Amazake commands";
-        this.usageMessage = "/amazake [version|reload|profile [seconds|stop]|cores]";
+        this.usageMessage = "/amazake [version|reload|profile [seconds|stop]|cores|systems|system <enable|disable|reload|info|update> <name>]";
         this.setPermission("amazake.command");
     }
 
@@ -60,6 +62,8 @@ public final class AmazakeCommand extends Command {
             }
             case "profile" -> this.profile(sender, args);
             case "cores" -> this.cores(sender);
+            case "systems" -> SystemsCommand.list(sender);
+            case "system" -> SystemsCommand.system(sender, args);
             default -> sender.sendMessage(text("Usage: " + this.usageMessage, RED));
         }
         return true;
@@ -134,7 +138,11 @@ public final class AmazakeCommand extends Command {
                 .filter(s -> !s.equals("reload") || sender.hasPermission(RELOAD_PERMISSION))
                 .filter(s -> !s.equals("profile") || sender.hasPermission(PROFILE_PERMISSION))
                 .filter(s -> !s.equals("cores") || sender.hasPermission(CORES_PERMISSION))
+                .filter(s -> !s.startsWith("system") || sender.hasPermission(SYSTEMS_PERMISSION))
                 .toList();
+        }
+        if (args.length >= 2 && args[0].equalsIgnoreCase("system") && sender.hasPermission(SYSTEMS_PERMISSION)) {
+            return SystemsCommand.complete(args);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("profile") && sender.hasPermission(PROFILE_PERMISSION)) {
             final String typed = args[1].toLowerCase(Locale.ROOT);

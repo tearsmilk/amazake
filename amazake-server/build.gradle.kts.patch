@@ -82,3 +82,67 @@
  idea {
      module {
          generatedSourceDirs.add(generatedDir.toFile())
+@@ -372,3 +400,63 @@
+         }
+     }
+ }
++
++// Amazake start - systems
++// Built-in systems: each is its own source set compiled against the server (Bukkit/Paper API + the systems API),
++// packed into a .azs and shipped as the server jar's resource systems/<Name>.azs. Their classes never land on the
++// server's own classpath, so a disabled system really unloads.
++val amazakeTab = sourceSets.create("amazakeTab") {
++    java { srcDir("src/systems/amazake-tab/java") }
++    resources { srcDir("src/systems/amazake-tab/resources") }
++    compileClasspath += sourceSets.main.get().output.classesDirs + sourceSets.main.get().compileClasspath
++}
++val amazakeTabTest = sourceSets.create("amazakeTabTest") {
++    java { srcDir("src/systems/amazake-tab/test/java") }
++    resources { srcDir("src/systems/amazake-tab/test/resources") }
++    compileClasspath += amazakeTab.output + amazakeTab.compileClasspath + sourceSets.test.get().compileClasspath
++    runtimeClasspath += output + compileClasspath + sourceSets.main.get().runtimeClasspath + sourceSets.test.get().runtimeClasspath
++}
++val amazakeTabAzs = tasks.register<Zip>("amazakeTabAzs") {
++    group = "amazake"
++    description = "Packs the AmazakeTab system into AmazakeTab.azs"
++    archiveFileName = "AmazakeTab.azs"
++    destinationDirectory = layout.buildDirectory.dir("systems")
++    isPreserveFileTimestamps = false
++    isReproducibleFileOrder = true
++    from(amazakeTab.output)
++}
++val builtinSystems = tasks.register<Sync>("builtinSystems") {
++    description = "Collects the built-in .azs files as server resources (systems/*.azs)"
++    from(amazakeTabAzs) { into("systems") }
++    into(layout.buildDirectory.dir("generated/builtin-systems"))
++}
++sourceSets.main { resources.srcDir(builtinSystems) }
++val testAmazakeTab = tasks.register<Test>("testAmazakeTab") {
++    group = "verification"
++    description = "Unit tests of the AmazakeTab system"
++    testClassesDirs = amazakeTabTest.output.classesDirs
++    classpath = amazakeTabTest.runtimeClasspath
++    workingDir = temporaryDir
++    useJUnitPlatform()
++}
++tasks.check { dependsOn(testAmazakeTab) }
++tasks.test { dependsOn(testAmazakeTab) } // :amazake-server:test also runs the built-in systems' tests
++
++// The systems API for system authors: amazake-systems-api-<version>.jar (+ sources).
++val systemsApiJar = tasks.register<Jar>("systemsApiJar") {
++    group = "amazake"
++    description = "The systems API (ink.hoka.amazake.systems.api) as amazake-systems-api-<version>.jar"
++    archiveBaseName = "amazake-systems-api"
++    archiveClassifier = ""
++    destinationDirectory = layout.buildDirectory.dir("libs")
++    from(sourceSets.main.get().output.classesDirs) { include("ink/hoka/amazake/systems/api/**") }
++}
++val systemsApiSourcesJar = tasks.register<Jar>("systemsApiSourcesJar") {
++    group = "amazake"
++    archiveBaseName = "amazake-systems-api"
++    archiveClassifier = "sources"
++    destinationDirectory = layout.buildDirectory.dir("libs")
++    from("src/main/java") { include("ink/hoka/amazake/systems/api/**") }
++}
++tasks.named("systemsApiJar") { finalizedBy(systemsApiSourcesJar) }
++// Amazake end - systems

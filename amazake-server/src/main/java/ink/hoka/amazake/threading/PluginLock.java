@@ -166,9 +166,13 @@ public final class PluginLock {
     /**
      * Whether {@code plugin}'s code must run under the lock: {@code force-locked} wins, then
      * {@code thread-safe}, then (with {@code trust-folia-supported}) {@code folia-supported: true} in the
-     * plugin's description; every other plugin is locked. Cached per plugin name.
+     * plugin's description; every other plugin is locked. Cached per plugin name. Amazake systems
+     * ({@link ink.hoka.amazake.systems.SystemPlugin}) are thread-safe by contract and never locked.
      */
     public static boolean needsLock(final Plugin plugin) {
+        if (plugin instanceof ink.hoka.amazake.systems.SystemPlugin) {
+            return false;
+        }
         final String name = plugin.getName();
         final PluginEntry known = PLUGINS.get(name);
         if (known != null && known.plugin.get() == plugin) {

@@ -1,0 +1,6 @@
+name: AmazakeTab
+version: 1.0.0
+main: ink.hoka.amazake.systems.tab.TabSystem
+description: Анимированные шапка и подвал таба, префиксы и сортировка игроков, сайдбар и таблички над головой
+authors: [Takuyamo]
+api-version: 1
