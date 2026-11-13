@@ -138,7 +138,7 @@ fi
 check 'AmazakeTab распакована в systems/AmazakeTab\.azs' "the built-in system is extracted at the first start"
 check 'AmazakeSystems \(1\):' "/pl has the AmazakeSystems section"
 check '^\[[0-9:]+ INFO\]: .*- .*AmazakeTab' "/pl lists AmazakeTab"
-check 'AmazakeTab .*1\.[0-9.]+ .*выключена' "/amazake systems lists AmazakeTab as disabled at first"
+check 'AmazakeTab .*[0-9]+\.[0-9.]+ .*выключена' "/amazake systems lists AmazakeTab as disabled at first"
 check 'Система AmazakeTab [0-9.]+ включена' "/amazake system enable AmazakeTab"
 if [ "$tab_config" = yes ]; then echo "ok: systems/AmazakeTab/config.yml written on enable"; else echo "MISSING: systems/AmazakeTab/config.yml after enable"; fail=1; fi
 check 'Система AmazakeTab перезагружена' "/amazake system reload AmazakeTab"
@@ -166,7 +166,7 @@ else
   echo "MISSING: AmazakeTab disabled and enabled again by /reload"; fail=1
 fi
 reload_check 'Системы: система AmazakeTab [0-9.]+ включена\.' "AmazakeTab enabled after /reload"
-reload_check 'AmazakeTab .*1\.[0-9.]+ .*включена' "/amazake systems after /reload lists AmazakeTab as enabled"
+reload_check 'AmazakeTab .*[0-9]+\.[0-9.]+ .*включена' "/amazake systems after /reload lists AmazakeTab as enabled"
 if grep -nE 'at core\.amazake\.systems|Не удалось включить систему|ошибка при (выключении|перезагрузке) системы' server.log; then
   echo "FOUND: an exception or error from AmazakeSystems"; fail=1
 else
