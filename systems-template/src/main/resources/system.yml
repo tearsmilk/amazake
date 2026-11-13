@@ -1,0 +1,7 @@
+# Описание системы. name и version подставляет сборка: name — rootProject.name из settings.gradle.kts, version — из build.gradle.kts.
+name: ${name}
+version: ${version}
+main: core.amazake.systems.example.ExampleSystem
+description: Пример системы Amazake — приветствие, actionbar с TPS и команда /example
+authors: [tearsmilk]
+api-version: 2

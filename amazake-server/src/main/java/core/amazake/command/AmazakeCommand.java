@@ -34,7 +34,7 @@ public final class AmazakeCommand extends Command {
     public AmazakeCommand(final String name) {
         super(name);
         this.description = "Amazake commands";
-        this.usageMessage = "/amazake [version|reload|profile [seconds|stop]|cores|systems|system <enable|disable|reload|info|update> <name>]";
+        this.usageMessage = "/amazake [version|reload|profile [seconds|stop]|cores|systems|system <enable|disable|reload|restart|info|update> <name>]";
         this.setPermission("amazake.command");
     }
 

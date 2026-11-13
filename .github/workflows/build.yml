@@ -30,7 +30,10 @@ jobs:
         run: |
           python3 -m unittest discover -s web/server -v
           bash -n web/deploy/install.sh web/deploy/uninstall.sh scripts/smoke-test.sh
-          shellcheck web/deploy/install.sh web/deploy/uninstall.sh scripts/smoke-test.sh
+          shellcheck web/deploy/install.sh web/deploy/uninstall.sh scripts/smoke-test.sh \
+            scripts/systems-api-docs.sh systems-template/deploy.sh
+          # docs/systems.md carries the systems API sources: they must match the code.
+          scripts/systems-api-docs.sh --check
 
       - name: Git user (paperweight applies patches as commits)
         run: git config --global user.email "actions@github.com" && git config --global user.name "GitHub Actions"
@@ -76,10 +79,17 @@ jobs:
           ls -l stress-plugin/build/libs/
           unzip -p stress-plugin/build/libs/AmazakeStress-*.jar plugin.yml
 
-      - name: Smoke test (start, commands, /stress run 40 with the plugin, stop)
+      - name: Build the system template (systems-template/) against this build's systems API
+        run: |
+          api=$(ls amazake-server/build/libs/amazake-systems-api-*.jar | grep -v -- '-sources\.jar$')
+          (cd systems-template && ./gradlew build -PamazakeApiJar="$GITHUB_WORKSPACE/$api" --stacktrace --no-daemon)
+          unzip -l systems-template/build/libs/Example.azs
+          unzip -p systems-template/build/libs/Example.azs system.yml
+
+      - name: Smoke test (start, commands, systems, /stress run 40 with the plugin, stop)
         run: |
           scripts/smoke-test.sh amazake-server/build/libs/amazake-paperclip-*-mojmap.jar \
-            "$(ls stress-plugin/build/libs/AmazakeStress-*.jar)"
+            "$(ls stress-plugin/build/libs/AmazakeStress-*.jar)" systems-template/build/libs/Example.azs
 
       - uses: actions/upload-artifact@v4
         with:
@@ -117,7 +127,12 @@ jobs:
           api_sources="amazake-systems-api-1.21.11-${{ github.run_number }}-sources.jar"
           cp "$(ls amazake-server/build/libs/amazake-systems-api-*.jar | grep -v -- '-sources\.jar$')" "$api"
           cp amazake-server/build/libs/amazake-systems-api-*-sources.jar "$api_sources"
+          # The same jar under a fixed name: systems-template/ downloads releases/latest/download/amazake-systems-api.jar.
+          cp "$api" amazake-systems-api.jar
+          # The template for writing a system, ready to unpack and build.
+          (git archive --format=zip --prefix=amazake-system-template/ HEAD:systems-template > amazake-system-template.zip)
           gh release create "build-${{ github.run_number }}" "$name" "$(basename "$stress")" "$api" "$api_sources" \
+            amazake-systems-api.jar amazake-system-template.zip \
             --target "$GITHUB_SHA" \
             --title "Amazake 1.21.11 #${{ github.run_number }}" \
             --notes "Built from ${GITHUB_SHA::7}: $(git log -1 --format=%s)" \

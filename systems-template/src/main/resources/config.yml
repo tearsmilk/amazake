@@ -1,0 +1,11 @@
+# Настройки системы Example. После правки: /amazake system reload Example
+# Тексты — MiniMessage: https://docs.advntr.dev/minimessage/format.html
+
+# Сообщение игроку при входе. <player> — ник.
+welcome: "<gradient:#DC143C:#FFB6C1>Добро пожаловать, <player>!</gradient>"
+
+# Строка над хотбаром (actionbar). <tps>, <mspt>, <online>, <max>, <ping>.
+actionbar:
+  enabled: true
+  interval-ticks: 20
+  format: "<gray>TPS <green><tps></green> · MSPT <yellow><mspt></yellow> · Онлайн <aqua><online>/<max></aqua> · Пинг <white><ping></white></gray>"

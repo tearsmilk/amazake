@@ -5,13 +5,19 @@
 # With the AmazakeStress plugin jar as second argument, the server starts with the plugin and also runs
 # "/stress run 40" with tiny intensities (scripts/stress-smoke-config.yml): the stages must advance, no
 # exception may come from the plugin, and the plugin's profiler report must reach the local site.
-#   scripts/smoke-test.sh path/to/amazake-paperclip.jar [path/to/AmazakeStress.jar]
+# With a third argument, a system .azs built from systems-template/ (system "Example") is put into systems/ before
+# the start, enabled, its /example command run, and restarted from a rebuilt file with /amazake system restart.
+#   scripts/smoke-test.sh path/to/amazake-paperclip.jar [path/to/AmazakeStress.jar [path/to/Example.azs]]
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 jar=$(realpath "$1")
 stress_jar=""
-if [ $# -ge 2 ]; then
+if [ $# -ge 2 ] && [ -n "$2" ]; then
   stress_jar=$(realpath "$2")
+fi
+example_azs=""
+if [ $# -ge 3 ]; then
+  example_azs=$(realpath "$3")
 fi
 dir=$(mktemp -d)
 site_port=18787
@@ -34,6 +40,9 @@ fi
 # systems.yml lists Ghost, a system with no .azs file: wanted but never running. Toggling AmazakeTab must keep it.
 mkdir -p systems
 printf 'enabled:\n  - Ghost\n' > systems/systems.yml
+if [ -n "$example_azs" ]; then
+  cp "$example_azs" systems/Example.azs
+fi
 mkfifo input
 # Keep the fifo open for writing so the server never sees end-of-input.
 exec 3<>input
@@ -73,6 +82,20 @@ send "amazake system reload AmazakeTab"
 send "amazake system disable AmazakeTab"
 state_after_disable=$(cat systems/systems.yml 2>/dev/null || true)
 send "amazake system enable AmazakeTab"
+
+# The template system: enabled at runtime, its command answers, then a new build of its file (written as a temporary
+# file and renamed over the old one, as deploy.sh does) is picked up by /amazake system restart.
+if [ -n "$example_azs" ]; then
+  send "amazake system enable Example"
+  send "example"
+  tmp_azs=$(mktemp -d)
+  mkdir "$tmp_azs/files"
+  (cd "$tmp_azs/files" && unzip -q "$example_azs" && sed -i -E 's/^version: .*/version: 1.0.1-smoke/' system.yml && zip -qr ../Example-new.azs .)
+  cp "$tmp_azs/Example-new.azs" systems/.Example.azs.upload
+  mv -f systems/.Example.azs.upload systems/Example.azs
+  send "amazake system restart Example"
+  send "example"
+fi
 
 stress_from=0
 if [ -n "$stress_jar" ]; then
@@ -167,6 +190,13 @@ else
 fi
 reload_check 'Системы: система AmazakeTab [0-9.]+ включена\.' "AmazakeTab enabled after /reload"
 reload_check 'AmazakeTab .*[0-9]+\.[0-9.]+ .*включена' "/amazake systems after /reload lists AmazakeTab as enabled"
+if [ -n "$example_azs" ]; then
+  check 'Система Example 1\.0\.0 включена' "the template system is enabled at runtime"
+  check 'Example 1\.0\.0' "/example answers"
+  check 'TPS [0-9]+\.[0-9], MSPT [0-9]+\.[0-9], онлайн 0/' "/example prints the server stats"
+  check 'Система Example перезапущена с файла systems/Example\.azs \(было 1\.0\.0, стало 1\.0\.1-smoke\)' "/amazake system restart picks up the new file"
+  check 'Example 1\.0\.1-smoke' "/example answers from the new build"
+fi
 if grep -nE 'at core\.amazake\.systems|Не удалось включить систему|ошибка при (выключении|перезагрузке) системы' server.log; then
   echo "FOUND: an exception or error from AmazakeSystems"; fail=1
 else

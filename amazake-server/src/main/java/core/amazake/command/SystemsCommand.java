@@ -16,12 +16,12 @@ import static net.kyori.adventure.text.format.NamedTextColor.GREEN;
 import static net.kyori.adventure.text.format.NamedTextColor.RED;
 import static net.kyori.adventure.text.format.NamedTextColor.YELLOW;
 
-/** /amazake systems and /amazake system enable|disable|reload|info|update &lt;name&gt;. */
+/** /amazake systems and /amazake system enable|disable|reload|restart|info|update &lt;name&gt;. */
 final class SystemsCommand {
 
     /** The colour of AmazakeSystems in /pl and here (crimson). */
     static final TextColor CRIMSON = TextColor.color(0xDC143C);
-    private static final List<String> ACTIONS = List.of("enable", "disable", "reload", "info", "update");
+    private static final List<String> ACTIONS = List.of("enable", "disable", "reload", "restart", "info", "update");
 
     private SystemsCommand() {
     }
@@ -48,7 +48,7 @@ final class SystemsCommand {
                     sender.sendMessage(text("    последняя ошибка: " + system.lastError(), RED));
                 }
             }
-            sender.sendMessage(text("/amazake system enable|disable|reload|info|update <имя>", GRAY));
+            sender.sendMessage(text("/amazake system enable|disable|reload|restart|info|update <имя>", GRAY));
         });
     }
 
@@ -57,7 +57,7 @@ final class SystemsCommand {
             return;
         }
         if (args.length < 3) {
-            sender.sendMessage(text("Использование: /amazake system <enable|disable|reload|info|update> <имя>", RED));
+            sender.sendMessage(text("Использование: /amazake system <enable|disable|reload|restart|info|update> <имя>", RED));
             return;
         }
         final String action = args[1].toLowerCase(Locale.ROOT);
@@ -66,12 +66,13 @@ final class SystemsCommand {
             case "enable" -> () -> SystemManager.enable(name);
             case "disable" -> () -> SystemManager.disable(name);
             case "reload" -> () -> SystemManager.reload(name);
+            case "restart" -> () -> SystemManager.restart(name);
             case "info" -> () -> SystemManager.info(name);
             case "update" -> () -> SystemManager.update(name);
             default -> null;
         };
         if (run == null) {
-            sender.sendMessage(text("Неизвестное действие «" + args[1] + "». Есть: enable, disable, reload, info, update", RED));
+            sender.sendMessage(text("Неизвестное действие «" + args[1] + "». Есть: enable, disable, reload, restart, info, update", RED));
             return;
         }
         onGlobalThread(sender, () -> {
@@ -94,6 +95,7 @@ final class SystemsCommand {
             final List<String> names = switch (args[1].toLowerCase(Locale.ROOT)) {
                 case "enable" -> SystemManager.names(false);
                 case "disable", "reload" -> SystemManager.names(true);
+                case "restart" -> SystemManager.names(null);
                 case "update" -> core.amazake.systems.BuiltinSystems.NAMES;
                 default -> SystemManager.names(null);
             };

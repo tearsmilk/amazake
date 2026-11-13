@@ -380,6 +380,43 @@ public final class SystemManager {
         return Result.ok("Система " + entry.name + " перезагружена.");
     }
 
+    /**
+     * Disables a running system and enables it again from its .azs file as it is now: a new build of the system put
+     * into systems/ (written as a temporary file and renamed over the old one) runs without a server restart. A
+     * system that is not running is just enabled.
+     */
+    public static synchronized Result restart(final String name) {
+        scan();
+        final Entry entry = find(name);
+        if (entry == null) {
+            return Result.fail("Системы «" + name + "» нет в папке systems/. Список: /amazake systems");
+        }
+        if (entry.running == null) {
+            return enable(entry, true);
+        }
+        final String oldVersion = entry.descriptor.version();
+        final Result off = disable(entry, false);
+        if (!off.ok()) {
+            return off;
+        }
+        scan();
+        final Entry fresh = SYSTEMS.get(entry.name);
+        if (fresh == null) {
+            return Result.fail("Система " + entry.name + " выключена, но её файла больше нет в папке systems/; она осталась выключенной.");
+        }
+        final Result on = enable(fresh, false);
+        if (!on.ok()) {
+            return on;
+        }
+        final List<String> lines = new ArrayList<>();
+        final String newVersion = fresh.descriptor.version();
+        lines.add("Система " + fresh.name + " перезапущена с файла systems/" + fresh.file.getFileName()
+            + (oldVersion.equals(newVersion) ? " (версия " + newVersion + ")." : " (было " + oldVersion + ", стало " + newVersion + ")."));
+        lines.addAll(on.lines().subList(Math.min(1, on.lines().size()), on.lines().size()));
+        LOGGER.info("Системы: " + lines.get(0));
+        return new Result(true, lines);
+    }
+
     /** Replaces a built-in system's file with the one in the server jar, re-enabling it if it was enabled. */
     public static synchronized Result update(final String name) {
         scan();
