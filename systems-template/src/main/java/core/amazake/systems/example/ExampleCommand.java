@@ -39,7 +39,8 @@ final class ExampleCommand extends Command {
             return true;
         }
         final ServerStats stats = this.system.context().stats();
-        sender.sendMessage(Component.text(this.system.context().info().name() + " " + this.system.context().info().version(), NamedTextColor.GOLD));
+        sender.sendMessage(Component.text(this.system.context().info().name() + " " + this.system.context().info().version()
+            + " — пример системы Amazake", NamedTextColor.GOLD));
         sender.sendMessage(Component.text(String.format(Locale.ROOT, "TPS %.1f, MSPT %.1f, онлайн %d/%d",
             stats.tps(), stats.mspt(), stats.onlinePlayers(), stats.maxPlayers()), NamedTextColor.GRAY));
         return true;

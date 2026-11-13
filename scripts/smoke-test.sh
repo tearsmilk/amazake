@@ -95,6 +95,16 @@ if [ -n "$example_azs" ]; then
   mv -f systems/.Example.azs.upload systems/Example.azs
   send "amazake system restart Example"
   send "example"
+  # A broken build (api-version the core does not run) is refused by restart and the running version stays; the good
+  # file is put back afterwards.
+  (cd "$tmp_azs/files" && sed -i -E 's/^api-version: .*/api-version: 1/' system.yml && zip -qr ../Example-broken.azs .)
+  cp systems/Example.azs "$tmp_azs/Example-good.azs"
+  cp "$tmp_azs/Example-broken.azs" systems/.Example.azs.upload
+  mv -f systems/.Example.azs.upload systems/Example.azs
+  send "amazake system restart Example"
+  send "example"
+  cp "$tmp_azs/Example-good.azs" systems/.Example.azs.upload
+  mv -f systems/.Example.azs.upload systems/Example.azs
 fi
 
 stress_from=0
@@ -159,7 +169,7 @@ else
   echo "MISSING: systems/AmazakeTab.azs or its line in systems/.installed"; fail=1
 fi
 check 'AmazakeTab распакована в systems/AmazakeTab\.azs' "the built-in system is extracted at the first start"
-check 'AmazakeSystems \(1\):' "/pl has the AmazakeSystems section"
+check 'AmazakeSystems \([0-9]+\):' "/pl has the AmazakeSystems section"
 check '^\[[0-9:]+ INFO\]: .*- .*AmazakeTab' "/pl lists AmazakeTab"
 check 'AmazakeTab .*[0-9]+\.[0-9.]+ .*выключена' "/amazake systems lists AmazakeTab as disabled at first"
 check 'Система AmazakeTab [0-9.]+ включена' "/amazake system enable AmazakeTab"
@@ -192,10 +202,17 @@ reload_check 'Системы: система AmazakeTab [0-9.]+ включена
 reload_check 'AmazakeTab .*[0-9]+\.[0-9.]+ .*включена' "/amazake systems after /reload lists AmazakeTab as enabled"
 if [ -n "$example_azs" ]; then
   check 'Система Example 1\.0\.0 включена' "the template system is enabled at runtime"
-  check 'Example 1\.0\.0' "/example answers"
+  check 'Example 1\.0\.0 — пример системы Amazake' "/example answers"
   check 'TPS [0-9]+\.[0-9], MSPT [0-9]+\.[0-9], онлайн 0/' "/example prints the server stats"
   check 'Система Example перезапущена с файла systems/Example\.azs \(было 1\.0\.0, стало 1\.0\.1-smoke\)' "/amazake system restart picks up the new file"
-  check 'Example 1\.0\.1-smoke' "/example answers from the new build"
+  check 'Example 1\.0\.1-smoke — пример системы Amazake' "/example answers from the new build"
+  check 'Новый файл systems/Example\.azs не годится: api-version 1' "/amazake system restart refuses a broken build"
+  check 'Система Example продолжает работать в прежней версии 1\.0\.1-smoke' "the running version stays after a refused restart"
+  if [ "$(grep -c 'Example 1\.0\.1-smoke — пример системы Amazake' server.log)" -ge 2 ]; then
+    echo "ok: /example still answers after the refused restart"
+  else
+    echo "MISSING: /example after the refused restart"; fail=1
+  fi
 fi
 if grep -nE 'at core\.amazake\.systems|Не удалось включить систему|ошибка при (выключении|перезагрузке) системы' server.log; then
   echo "FOUND: an exception or error from AmazakeSystems"; fail=1

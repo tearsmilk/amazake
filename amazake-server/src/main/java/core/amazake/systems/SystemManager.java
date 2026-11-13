@@ -394,6 +394,18 @@ public final class SystemManager {
         if (entry.running == null) {
             return enable(entry, true);
         }
+        // Check the new file before stopping the running version: a broken deploy keeps the old one running.
+        final SystemDescriptor next;
+        try {
+            next = SystemDescriptor.read(entry.file);
+        } catch (final SystemDescriptor.InvalidException e) {
+            return Result.fail("Новый файл systems/" + entry.file.getFileName() + " не годится: " + e.getMessage(),
+                "Система " + entry.name + " продолжает работать в прежней версии " + entry.descriptor.version() + ".");
+        }
+        if (!next.name().equals(entry.name)) {
+            return Result.fail("Файл systems/" + entry.file.getFileName() + " теперь содержит систему " + next.name() + ", а не " + entry.name + ".",
+                "Система " + entry.name + " продолжает работать в прежней версии " + entry.descriptor.version() + ".");
+        }
         final String oldVersion = entry.descriptor.version();
         final Result off = disable(entry, false);
         if (!off.ok()) {
@@ -402,7 +414,7 @@ public final class SystemManager {
         scan();
         final Entry fresh = SYSTEMS.get(entry.name);
         if (fresh == null) {
-            return Result.fail("Система " + entry.name + " выключена, но её файла больше нет в папке systems/; она осталась выключенной.");
+            return Result.fail("Система " + entry.name + " выключена, но после этого её файл в systems/ пропал или испортился (подробности в консоли); она осталась выключенной.");
         }
         final Result on = enable(fresh, false);
         if (!on.ok()) {
@@ -413,7 +425,7 @@ public final class SystemManager {
         lines.add("Система " + fresh.name + " перезапущена с файла systems/" + fresh.file.getFileName()
             + (oldVersion.equals(newVersion) ? " (версия " + newVersion + ")." : " (было " + oldVersion + ", стало " + newVersion + ")."));
         lines.addAll(on.lines().subList(Math.min(1, on.lines().size()), on.lines().size()));
-        LOGGER.info("Системы: " + lines.get(0));
+        LOGGER.info("Системы: система " + fresh.name + " перезапущена с файла (" + oldVersion + " -> " + newVersion + ").");
         return new Result(true, lines);
     }
 

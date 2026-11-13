@@ -2,6 +2,9 @@
 //   ./gradlew azs                      -> build/libs/<Имя>.azs
 //   ./gradlew azs -PamazakeApiJar=путь -> собрать против своего jar API (иначе он скачивается из последнего релиза)
 //   ./gradlew refreshSystemsApi        -> скачать API заново (после выхода нового релиза ядра)
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+
 plugins {
     java
 }
@@ -19,9 +22,12 @@ val apiJar: File = (findProperty("amazakeApiJar") as String?)?.let { file(it) }
             logger.lifecycle("Скачиваю API систем Amazake: $apiUrl")
             val tmp = File(jar.parentFile, jar.name + ".part")
             uri(apiUrl).toURL().openStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
-            tmp.renameTo(jar)
+            Files.move(tmp.toPath(), jar.toPath(), StandardCopyOption.REPLACE_EXISTING)
         }
     }
+if (!apiJar.isFile) {
+    throw GradleException("Нет jar API систем Amazake: $apiJar. Укажите -PamazakeApiJar=путь или проверьте интернет ($apiUrl)")
+}
 
 repositories {
     mavenCentral()
@@ -69,7 +75,7 @@ tasks.register("azs") {
 
 tasks.register<Delete>("refreshSystemsApi") {
     group = "build setup"
-    description = "Удаляет скачанный jar API систем: при следующей сборке скачается свежий"
+    description = "Удаляет скачанный jar API систем: при следующей сборке скачается свежий (запускайте отдельно: ./gradlew refreshSystemsApi)"
     delete("libs/amazake-systems-api.jar")
 }
 

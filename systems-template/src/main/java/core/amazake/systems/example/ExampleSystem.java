@@ -63,13 +63,19 @@ public final class ExampleSystem implements AmazakeSystem, Listener {
     @Override
     public void reload(final SystemContext context) {
         this.loadSettings(context);
-        // Интервал мог поменяться: перезапускаем задачи игроков.
-        for (final ScheduledTask task : this.actionbars.values()) {
-            task.cancel();
-        }
-        this.actionbars.clear();
+        // Интервал мог поменяться: каждому игроку — новая задача. startActionbar заменяет и отменяет старую задачу
+        // игрока сам (put + cancel), поэтому карту не чистим целиком: так не потеряется задача игрока, который
+        // зашёл в этот момент в другом потоке.
+        final boolean enabled = this.settings.get().actionbarEnabled();
         for (final Player player : Bukkit.getOnlinePlayers()) {
-            this.startActionbar(player);
+            if (enabled) {
+                this.startActionbar(player);
+            } else {
+                final ScheduledTask old = this.actionbars.remove(player.getUniqueId());
+                if (old != null) {
+                    old.cancel();
+                }
+            }
         }
     }
 
