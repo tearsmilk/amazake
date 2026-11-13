@@ -4,7 +4,7 @@
              this.moveStartZ = this.getZ();
              this.moveVector = movement;
          }
-+        final int amazake$p = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.MOVE); // Amazake - entity tick breakdown
++        final int amazake$p = core.amazake.tick.EntityTickStats.enter(core.amazake.tick.EntityTickStats.MOVE); // Amazake - entity tick breakdown
          try {
          // Paper end - detailed watchdog information
          if (this.noPhysics) {
@@ -12,7 +12,7 @@
          }
          // Paper start - detailed watchdog information
          } finally {
-+            ink.hoka.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
++            core.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
              synchronized (this.posLock) { // Paper
                  this.moveVector = null;
              } // Paper
@@ -20,12 +20,12 @@
      }
  
      protected boolean updateInWaterStateAndDoFluidPushing() {
-+        final int amazake$p = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.FLUIDS); // Amazake - entity tick breakdown
++        final int amazake$p = core.amazake.tick.EntityTickStats.enter(core.amazake.tick.EntityTickStats.FLUIDS); // Amazake - entity tick breakdown
          this.fluidHeight.clear();
          this.updateInWaterStateAndDoWaterCurrentPushing();
          double d = this.level.environmentAttributes().getDimensionValue(EnvironmentAttributes.FAST_LAVA) ? 0.007 : 0.0023333333333333335;
          boolean flag = this.updateFluidHeightAndDoFluidPushing(FluidTags.LAVA, d);
-+        ink.hoka.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
++        core.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
          return this.isInWater() || flag;
      }
  

@@ -2,7 +2,7 @@ plugins {
     java
 }
 
-group = "ink.hoka.amazake"
+group = "core.amazake"
 version = "1.0.0"
 description = "Reproducible heavy-load benchmark plugin for Paper-based 1.21.11 servers"
 

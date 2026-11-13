@@ -4,16 +4,16 @@
                  // don't execute if the plugin is disabled
                  return;
              }
-+            final long amazake$lock = ink.hoka.amazake.threading.PluginLock.active() ? ink.hoka.amazake.threading.PluginLock.lock(plugin) : ink.hoka.amazake.threading.PluginLock.NOT_LOCKED; // Amazake - plugin lock
-+            final int amazake$token = ink.hoka.amazake.plugin.PluginTickStats.enter(plugin, ink.hoka.amazake.plugin.PluginTickStats.TASKS); // Amazake - plugin tick breakdown
++            final long amazake$lock = core.amazake.threading.PluginLock.active() ? core.amazake.threading.PluginLock.lock(plugin) : core.amazake.threading.PluginLock.NOT_LOCKED; // Amazake - plugin lock
++            final int amazake$token = core.amazake.plugin.PluginTickStats.enter(plugin, core.amazake.plugin.PluginTickStats.TASKS); // Amazake - plugin tick breakdown
              try {
                  runnable.run();
              } catch (final Throwable throwable) {
                  plugin.getLogger().log(Level.WARNING, "Entity task for " + plugin.getDescription().getFullName() + " generated an exception", throwable);
 -            }
 +            } finally { // Amazake - plugin tick breakdown
-+                ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
-+                ink.hoka.amazake.threading.PluginLock.unlock(amazake$lock); // Amazake - plugin lock
++                core.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
++                core.amazake.threading.PluginLock.unlock(amazake$lock); // Amazake - plugin lock
 +            } // Amazake - plugin tick breakdown
          };
      }

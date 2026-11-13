@@ -5,8 +5,8 @@
          COMMANDS.put("paper", new PaperCommand("paper"));
          COMMANDS.put("mspt", new MSPTCommand("mspt"));
 +        // Amazake start - amazake.yml and /amazake
-+        ink.hoka.amazake.AmazakeConfig.load(new java.io.File("."));
-+        COMMANDS.put("amazake", new ink.hoka.amazake.command.AmazakeCommand("amazake"));
++        core.amazake.AmazakeConfig.load(new java.io.File("."));
++        COMMANDS.put("amazake", new core.amazake.command.AmazakeCommand("amazake"));
 +        // Amazake end - amazake.yml and /amazake
  
          COMMANDS.forEach((s, command) -> {

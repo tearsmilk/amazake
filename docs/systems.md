@@ -30,7 +30,7 @@ version: 1.0.0
 main: com.example.mysystem.MySystem  # класс, реализующий AmazakeSystem, с публичным конструктором без аргументов
 description: Что делает система       # необязательно
 authors: [Вы]                         # необязательно (или author: Вы)
-api-version: 1                        # версия API систем; это ядро понимает 1
+api-version: 2                        # версия API систем; это ядро понимает 2
 conflicts: [SomePlugin]               # необязательно: плагины, которые делают то же самое (при включении будет предупреждение)
 ```
 
@@ -39,7 +39,7 @@ conflicts: [SomePlugin]               # необязательно: плагин
 
 ## API
 
-API систем — пакет `ink.hoka.amazake.systems.api` (jar `amazake-systems-api-<версия>.jar` есть в каждом
+API систем — пакет `core.amazake.systems.api` (jar `amazake-systems-api-<версия>.jar` есть в каждом
 релизе, исходники рядом). Система может пользоваться им и обычным API Bukkit/Paper (Adventure, MiniMessage
 и т. д.). Внутренние классы ядра (`net.minecraft`, `org.bukkit.craftbukkit`) не используйте: они меняются от
 версии к версии.
@@ -75,8 +75,8 @@ public interface AmazakeSystem {
 ```java
 package com.example.mysystem;
 
-import ink.hoka.amazake.systems.api.AmazakeSystem;
-import ink.hoka.amazake.systems.api.SystemContext;
+import core.amazake.systems.api.AmazakeSystem;
+import core.amazake.systems.api.SystemContext;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicReference;
 import net.kyori.adventure.text.Component;

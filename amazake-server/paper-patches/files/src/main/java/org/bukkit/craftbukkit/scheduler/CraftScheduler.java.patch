@@ -4,8 +4,8 @@
              }
              if (task.isSync()) {
                  this.currentTask = task;
-+                final long amazake$lock = ink.hoka.amazake.threading.PluginLock.active() ? ink.hoka.amazake.threading.PluginLock.lock(task.getOwner()) : ink.hoka.amazake.threading.PluginLock.NOT_LOCKED; // Amazake - plugin lock
-+                final int amazake$token = ink.hoka.amazake.plugin.PluginTickStats.enter(task.getOwner(), ink.hoka.amazake.plugin.PluginTickStats.TASKS); // Amazake - plugin tick breakdown
++                final long amazake$lock = core.amazake.threading.PluginLock.active() ? core.amazake.threading.PluginLock.lock(task.getOwner()) : core.amazake.threading.PluginLock.NOT_LOCKED; // Amazake - plugin lock
++                final int amazake$token = core.amazake.plugin.PluginTickStats.enter(task.getOwner(), core.amazake.plugin.PluginTickStats.TASKS); // Amazake - plugin tick breakdown
                  try {
                      task.run();
                  } catch (final Throwable throwable) {
@@ -13,8 +13,8 @@
                          new com.destroystokyo.paper.event.server.ServerExceptionEvent(new com.destroystokyo.paper.exception.ServerSchedulerException(logMessage, throwable, task)));
                      // Paper end
                  } finally {
-+                    ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
-+                    ink.hoka.amazake.threading.PluginLock.unlock(amazake$lock); // Amazake - plugin lock
++                    core.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
++                    core.amazake.threading.PluginLock.unlock(amazake$lock); // Amazake - plugin lock
                      this.currentTask = null;
                  }
                  this.parsePending();

@@ -4,7 +4,7 @@
                  });
          }
          Throwable thrown = null;
-+        final long amazake$cpu = ink.hoka.amazake.plugin.PluginTickStats.asyncStart(); // Amazake - plugin tick breakdown
++        final long amazake$cpu = core.amazake.plugin.PluginTickStats.asyncStart(); // Amazake - plugin tick breakdown
          try {
              super.run();
          } catch (final Throwable t) {
@@ -12,7 +12,7 @@
                          this.getTaskId()),
                      thrown);
          } finally {
-+            ink.hoka.amazake.plugin.PluginTickStats.asyncEnd(this.getOwner(), amazake$cpu); // Amazake - plugin tick breakdown
++            core.amazake.plugin.PluginTickStats.asyncEnd(this.getOwner(), amazake$cpu); // Amazake - plugin tick breakdown
              // Cleanup is important for any async task, otherwise ghost tasks are everywhere
              synchronized (this.workers) {
                  try {

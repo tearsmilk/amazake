@@ -9,7 +9,7 @@
 исключение (никогда — тихую гонку). Игроки на целевом сервере разбросаны по миру, поэтому регионы окупаются.
 
 1. **Подготовка (ничего не меняет, пока многопоточность выключена).** Секции `multithreading` и
-   `plugin-threading` в `AmazakeConfig`. Класс `ink.hoka.amazake.threading.PluginLock`: одна общая
+   `plugin-threading` в `AmazakeConfig`. Класс `core.amazake.threading.PluginLock`: одна общая
    реентерабельная блокировка на весь код плагинов, не готовых к многопоточности, — на всю раздачу синхронного
    события (`PaperEventManager#callEvent`), на каждую синхронную задачу (`CraftScheduler#mainThreadHeartbeat`,
    `FoliaGlobalRegionScheduler`, `FoliaEntityScheduler`) и на команды плагинов и их автодополнение
@@ -33,7 +33,7 @@
 Ниже — исходная карта точек входа в коде Minecraft; она остаётся справочником для шагов 2–4.
 
 Карта следующих шагов Amazake, для которых нужны патчи к коду Minecraft (`amazake-server/minecraft-patches/`).
-Сейчас в Amazake есть только раскладка ядер и профайлер: оба живут в `amazake-server/src/main/java/ink/hoka/amazake/`
+Сейчас в Amazake есть только раскладка ядер и профайлер: оба живут в `amazake-server/src/main/java/core/amazake/`
 и не трогают тик. Всё, что ниже, меняет сам тик, поэтому каждая фича получает переключатель в `amazake.yml`,
 а по умолчанию выключена, пока не пройдёт проверку на AmazakeStress (кроме шага 1: он только измеряет).
 
@@ -174,9 +174,9 @@ Leaf уже меряет целый мир (SparklyPaper «Track each world MSPT
 `blockEvents`, провода — в обновлениях соседей внутри той фазы, которая поставила блок. В отчёте это «блоки»:
 `blockTicks + blockEvents + blockEntities`.
 
-**Код.** Счётчики — свой класс без Bukkit: `ink.hoka.amazake.tick.PhaseClock` (прототип с тестом:
-`/tmp/claude-0/-home-user/d8dff9cc-7075-58a3-a329-0259f695514b/scratchpad/reserve/src/ink/hoka/amazake/tick/PhaseClock.java`).
-Один экземпляр на мир (`ServerLevel` получает поле `public final ink.hoka.amazake.tick.PhaseClock amazake$phases`) и
+**Код.** Счётчики — свой класс без Bukkit: `core.amazake.tick.PhaseClock` (прототип с тестом:
+`/tmp/claude-0/-home-user/d8dff9cc-7075-58a3-a329-0259f695514b/scratchpad/reserve/src/core/amazake/tick/PhaseClock.java`).
+Один экземпляр на мир (`ServerLevel` получает поле `public final core.amazake.tick.PhaseClock amazake$phases`) и
 один на общие фазы сервера. Пишет только поток, который тикает мир; счётчики только растут (`AtomicLongArray`, запись
 `lazySet` одним писателем). Профайлер в своём потоке берёт два снимка и вычитает — главный поток для этого не нужен
 (в отличие от `profiler/WorldSnapshots.java`). Максимум тика мира за интервал: писатель хранит `max`, читатель
@@ -407,7 +407,7 @@ ChunkMap.TrackedEntity.class` — как у Leaf), отправка пакето
 4 потоках. Проверка корректности: на клиенте нет «невидимых» и «застывших» мобов, отбрасывание без рывков.
 
 **Объём.** Leaf: 1187 строк патча к Minecraft, ~60 строк к CraftBukkit, ~560 строк своего кода. У нас в fork-join
-режиме синхронизации меньше: ~600–800 строк патчей, ~400 строк своего кода (`ink.hoka.amazake.tracker`). 4–6 дней
+режиме синхронизации меньше: ~600–800 строк патчей, ~400 строк своего кода (`core.amazake.tracker`). 4–6 дней
 с проверкой.
 
 ---
@@ -583,7 +583,7 @@ Leaf), чтобы поток пути не трогал моба вовсе.
 
 1. **Замер** — шаг 1 (`PhaseClock` даёт время мира за тик).
 2. **Решение** — `WorldGroupPlanner` (без Bukkit; прототип с тестом:
-   `/tmp/claude-0/-home-user/d8dff9cc-7075-58a3-a329-0259f695514b/scratchpad/reserve/src/ink/hoka/amazake/tick/WorldGroupPlanner.java`).
+   `/tmp/claude-0/-home-user/d8dff9cc-7075-58a3-a329-0259f695514b/scratchpad/reserve/src/core/amazake/tick/WorldGroupPlanner.java`).
    Раз в тик на главном потоке получает время каждого мира, сглаживает (EWMA, `alpha 0.05`, ≈1 с) и возвращает
    «полосы» на следующий тик:
    - параллельный режим **включается**, если сумма миров ≥ `on-ms` (30 мс) подряд `on-ticks` (100) тиков и хотя бы
@@ -807,11 +807,11 @@ Amazake — GPLv3. Если переносим **код** (а не только 
 
 ### Сделано
 
-- Разбивка тика сущностей (`ink.hoka.amazake.tick.EntityTickStats`, блок `entities` отчёта): мобы, остальные
+- Разбивка тика сущностей (`core.amazake.tick.EntityTickStats`, блок `entities` отчёта): мобы, остальные
   сущности и игроки, по типам и фазам. Это часть шага 1 для фазы `entities`; фазы мира целиком ещё не меряются.
 - Роль `plugins` в раскладке ядер: асинхронная работа плагинов (планировщики Bukkit и Folia, асинхронный чат,
   пулы входа и конфигурации, потоки, которые плагины создали сами) на своём ядре; ядро-подложка `background`,
   где у потоков плагинов приоритет (nice только у известных серверных потоков). Код плагинов, который трогает
   мир, по-прежнему идёт в главном потоке: гонок нет.
-- Замер «мостика» к главному потоку (`ink.hoka.amazake.plugin.PluginTickStats`, блок `plugins` отчёта): мс/тик
+- Замер «мостика» к главному потоку (`core.amazake.plugin.PluginTickStats`, блок `plugins` отчёта): мс/тик
   каждого плагина на синхронные задачи, события и команды, и CPU его асинхронных задач.

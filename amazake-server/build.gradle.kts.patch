@@ -131,18 +131,18 @@
 +// The systems API for system authors: amazake-systems-api-<version>.jar (+ sources).
 +val systemsApiJar = tasks.register<Jar>("systemsApiJar") {
 +    group = "amazake"
-+    description = "The systems API (ink.hoka.amazake.systems.api) as amazake-systems-api-<version>.jar"
++    description = "The systems API (core.amazake.systems.api) as amazake-systems-api-<version>.jar"
 +    archiveBaseName = "amazake-systems-api"
 +    archiveClassifier = ""
 +    destinationDirectory = layout.buildDirectory.dir("libs")
-+    from(sourceSets.main.get().output.classesDirs) { include("ink/hoka/amazake/systems/api/**") }
++    from(sourceSets.main.get().output.classesDirs) { include("core/amazake/systems/api/**") }
 +}
 +val systemsApiSourcesJar = tasks.register<Jar>("systemsApiSourcesJar") {
 +    group = "amazake"
 +    archiveBaseName = "amazake-systems-api"
 +    archiveClassifier = "sources"
 +    destinationDirectory = layout.buildDirectory.dir("libs")
-+    from("src/main/java") { include("ink/hoka/amazake/systems/api/**") }
++    from("src/main/java") { include("core/amazake/systems/api/**") }
 +}
 +tasks.named("systemsApiJar") { finalizedBy(systemsApiSourcesJar) }
 +// Amazake end - systems

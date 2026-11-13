@@ -4,8 +4,8 @@
  
          HandlerList handlers = event.getHandlers();
          RegisteredListener[] listeners = handlers.getRegisteredListeners();
-+        final boolean amazake$timed = !event.isAsynchronous() && ink.hoka.amazake.plugin.PluginTickStats.enabled(); // Amazake - plugin tick breakdown
-+        final long amazake$lock = ink.hoka.amazake.threading.PluginLock.active() ? ink.hoka.amazake.threading.PluginLock.lockEvent(event, handlers, listeners) : ink.hoka.amazake.threading.PluginLock.NOT_LOCKED; // Amazake - plugin lock: the whole dispatch
++        final boolean amazake$timed = !event.isAsynchronous() && core.amazake.plugin.PluginTickStats.enabled(); // Amazake - plugin tick breakdown
++        final long amazake$lock = core.amazake.threading.PluginLock.active() ? core.amazake.threading.PluginLock.lockEvent(event, handlers, listeners) : core.amazake.threading.PluginLock.NOT_LOCKED; // Amazake - plugin lock: the whole dispatch
 +        try { // Amazake - plugin lock
  
          for (RegisteredListener registration : listeners) {
@@ -13,7 +13,7 @@
                  continue;
              }
  
-+            final int amazake$token = amazake$timed ? ink.hoka.amazake.plugin.PluginTickStats.enter(registration.getPlugin(), ink.hoka.amazake.plugin.PluginTickStats.EVENTS) : -1; // Amazake - plugin tick breakdown
++            final int amazake$token = amazake$timed ? core.amazake.plugin.PluginTickStats.enter(registration.getPlugin(), core.amazake.plugin.PluginTickStats.EVENTS) : -1; // Amazake - plugin tick breakdown
              try {
                  registration.callEvent(event);
              } catch (AuthorNagException ex) {
@@ -23,11 +23,11 @@
                  }
 -            }
 +            } finally { // Amazake - plugin tick breakdown
-+                ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
++                core.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
 +            } // Amazake - plugin tick breakdown
          }
 +        } finally { // Amazake - plugin lock
-+            ink.hoka.amazake.threading.PluginLock.unlock(amazake$lock); // Amazake - plugin lock
++            core.amazake.threading.PluginLock.unlock(amazake$lock); // Amazake - plugin lock
 +        } // Amazake - plugin lock
      }
  

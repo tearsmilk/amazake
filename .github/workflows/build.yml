@@ -50,7 +50,7 @@ jobs:
           ./gradlew createMojmapPaperclipJar --stacktrace --no-daemon
 
       - name: Unit tests (Amazake's own and the built-in systems)
-        run: ./gradlew :amazake-server:test --tests 'ink.hoka.amazake.AmazakeTestSuite' :amazake-server:testAmazakeTab --stacktrace --no-daemon
+        run: ./gradlew :amazake-server:test --tests 'core.amazake.AmazakeTestSuite' :amazake-server:testAmazakeTab --stacktrace --no-daemon
 
       - name: The systems API jar and the built-in systems
         run: |
@@ -60,7 +60,7 @@ jobs:
           # AmazakeTab ships as a resource (systems/AmazakeTab.azs) and must not be on the server's own classpath.
           server=$(ls amazake-server/build/libs/amazake-server-*.jar)
           unzip -l "$server" systems/AmazakeTab.azs
-          if unzip -l "$server" | grep -q 'ink/hoka/amazake/systems/tab/'; then
+          if unzip -l "$server" | grep -q 'core/amazake/systems/tab/'; then
             echo "AmazakeTab classes are on the server classpath"; exit 1
           fi
 

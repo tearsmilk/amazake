@@ -43,7 +43,7 @@
 ./gradlew createMojmapPaperclipJar
 ```
 
-Готовый сервер появится в `amazake-server/build/libs/amazake-paperclip-1.21.11-R0.1-SNAPSHOT-mojmap.jar`. Встроенные системы (`amazake-server/src/systems/`) собираются вместе с ним: каждая в свой `.azs`, который кладётся в jar ресурсом `systems/<Имя>.azs`. API для систем: `./gradlew :amazake-server:systemsApiJar` → `amazake-server/build/libs/amazake-systems-api-<версия>.jar` (и `-sources.jar`). Тесты: `./gradlew :amazake-server:test --tests ink.hoka.amazake.AmazakeTestSuite :amazake-server:testAmazakeTab`.
+Готовый сервер появится в `amazake-server/build/libs/amazake-paperclip-1.21.11-R0.1-SNAPSHOT-mojmap.jar`. Встроенные системы (`amazake-server/src/systems/`) собираются вместе с ним: каждая в свой `.azs`, который кладётся в jar ресурсом `systems/<Имя>.azs`. API для систем: `./gradlew :amazake-server:systemsApiJar` → `amazake-server/build/libs/amazake-systems-api-<версия>.jar` (и `-sources.jar`). Тесты: `./gradlew :amazake-server:test --tests core.amazake.AmazakeTestSuite :amazake-server:testAmazakeTab`.
 
 Каждый пуш в `main` GitHub Actions собирает сам. Перед публикацией собранный сервер запускается, и проверяются `/version`, `/amazake`, `/spark`, `amazake.yml` и системы ядра (AmazakeTab включается, перезагружается и выключается на ходу). Если всё прошло, jar выкладывается в Releases вместе с `amazake-systems-api-1.21.11-N.jar`.
 
@@ -249,7 +249,7 @@ Amazake cores: tick moved cpu0 -> cpu11 (foreign load 48%, steal 3%)
 3. Пересобираете патчи. Для API и одиночных файлов Paper — `./gradlew rebuildPaperPatches`. Полный список задач пересборки серверной части выводит `./gradlew tasks --all | grep -i rebuild`.
 4. Коммитите изменённые файлы `*-patches/` в этот репозиторий.
 
-Собственные классы Amazake (не патчи) лежат в `amazake-server/src/main/java/ink/hoka/amazake/`.
+Собственные классы Amazake (не патчи) лежат в `amazake-server/src/main/java/core/amazake/`.
 
 Отмечайте изменения в коде Minecraft и Paper комментариями `// Amazake - что и зачем`, а блоки — `// Amazake start - …` и `// Amazake end - …`. Так при обновлении Paper сразу видно, где наш код.
 

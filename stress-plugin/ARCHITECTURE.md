@@ -1,6 +1,6 @@
 # AmazakeStress — architecture (for module authors)
 
-Package `ink.hoka.amazake.stress`. Public Paper API only (`io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT`, Java 21):
+Package `core.amazake.stress`. Public Paper API only (`io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT`, Java 21):
 no NMS, no reflection. Code and comments in English; user-facing strings (`status()`, chat) in Russian.
 
 Build: `/home/user/amazake/gradlew -p stress-plugin build` → `stress-plugin/build/libs/AmazakeStress-<version>.jar`.
@@ -44,15 +44,15 @@ Fixed files and public shape (do not rename; registry calls `XModule::new` with 
 
 | id | class | constructor | starts on | lane |
 |---|---|---|---|---|
-| `mobs` | `ink.hoka.amazake.stress.mobs.MobsModule` | `public MobsModule(StressPlugin plugin)` | `Stage.MOBS` | 0 |
-| `physics` | `ink.hoka.amazake.stress.physics.PhysicsModule` | `public PhysicsModule(StressPlugin plugin)` | `Stage.PHYSICS` | 1 |
-| `redstone` | `ink.hoka.amazake.stress.redstone.RedstoneModule` | `public RedstoneModule(StressPlugin plugin)` | `Stage.REDSTONE` | 2 |
-| `chunks` | `ink.hoka.amazake.stress.chunks.ChunksModule` | `public ChunksModule(StressPlugin plugin)` | `Stage.CHUNKS` | 3 |
-| `packets` | `ink.hoka.amazake.stress.packets.PacketsModule` | `public PacketsModule(StressPlugin plugin)` | `Stage.PACKETS` | 4 |
-| `async` | `ink.hoka.amazake.stress.async.AsyncLoadModule` | `public AsyncLoadModule(StressPlugin plugin)` | `Stage.PACKETS` | 5 |
-| `races` | `ink.hoka.amazake.stress.races.RacesModule` | `public RacesModule(StressPlugin plugin)` | `Stage.PACKETS` | 6 |
+| `mobs` | `core.amazake.stress.mobs.MobsModule` | `public MobsModule(StressPlugin plugin)` | `Stage.MOBS` | 0 |
+| `physics` | `core.amazake.stress.physics.PhysicsModule` | `public PhysicsModule(StressPlugin plugin)` | `Stage.PHYSICS` | 1 |
+| `redstone` | `core.amazake.stress.redstone.RedstoneModule` | `public RedstoneModule(StressPlugin plugin)` | `Stage.REDSTONE` | 2 |
+| `chunks` | `core.amazake.stress.chunks.ChunksModule` | `public ChunksModule(StressPlugin plugin)` | `Stage.CHUNKS` | 3 |
+| `packets` | `core.amazake.stress.packets.PacketsModule` | `public PacketsModule(StressPlugin plugin)` | `Stage.PACKETS` | 4 |
+| `async` | `core.amazake.stress.async.AsyncLoadModule` | `public AsyncLoadModule(StressPlugin plugin)` | `Stage.PACKETS` | 5 |
+| `races` | `core.amazake.stress.races.RacesModule` | `public RacesModule(StressPlugin plugin)` | `Stage.PACKETS` | 6 |
 
-Profiler: `ink.hoka.amazake.stress.profiler.StressProfiler` — `public StressProfiler(StressPlugin plugin)`,
+Profiler: `core.amazake.stress.profiler.StressProfiler` — `public StressProfiler(StressPlugin plugin)`,
 implements `ProfilerBridge` (placeholder answers «профайлер ещё не подключён»).
 
 Each module may add helper classes inside its own package. Config keys: only under `modules.<id>` in

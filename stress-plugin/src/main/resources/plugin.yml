@@ -1,6 +1,6 @@
 name: AmazakeStress
 version: '${version}'
-main: ink.hoka.amazake.stress.StressPlugin
+main: core.amazake.stress.StressPlugin
 api-version: '1.21'
 description: Воспроизводимый стресс-тест сервера Paper 1.21.11 для сравнения форков (Leaf, Amazake и др.)
 authors: [tearsmilk]

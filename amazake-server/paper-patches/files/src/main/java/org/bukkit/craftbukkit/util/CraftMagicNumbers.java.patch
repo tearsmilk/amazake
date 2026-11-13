@@ -5,7 +5,7 @@
      @Override
      public com.destroystokyo.paper.util.VersionFetcher getVersionFetcher() {
 -        return new com.destroystokyo.paper.PaperVersionFetcher();
-+        return new ink.hoka.amazake.AmazakeVersionFetcher(); // Amazake - /version names Amazake builds, not Paper downloads
++        return new core.amazake.AmazakeVersionFetcher(); // Amazake - /version names Amazake builds, not Paper downloads
      }
  
      @Override

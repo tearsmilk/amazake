@@ -4,12 +4,12 @@
              // Paper end - EntityPathfindEvent
              ProfilerFiller profilerFiller = Profiler.get();
              profilerFiller.push("pathfind");
-+            final int amazake$p = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.PATHFIND); // Amazake - entity tick breakdown
++            final int amazake$p = core.amazake.tick.EntityTickStats.enter(core.amazake.tick.EntityTickStats.PATHFIND); // Amazake - entity tick breakdown
              BlockPos blockPos = offsetUpward ? this.mob.blockPosition().above() : this.mob.blockPosition();
              int i = (int)(followRange + regionOffset);
              PathNavigationRegion pathNavigationRegion = new PathNavigationRegion(this.level, blockPos.offset(-i, -i, -i), blockPos.offset(i, i, i));
              Path path = this.pathFinder.findPath(pathNavigationRegion, this.mob, targets, followRange, reachRange, this.maxVisitedNodesMultiplier);
-+            ink.hoka.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
++            core.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
              profilerFiller.pop();
              if (path != null && path.getTarget() != null) {
                  this.targetPos = path.getTarget();

@@ -4,7 +4,7 @@
      }
  
      private void mergeWithNeighbours() {
-+        final int amazake$p = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.MERGE); // Amazake - entity tick breakdown
++        final int amazake$p = core.amazake.tick.EntityTickStats.enter(core.amazake.tick.EntityTickStats.MERGE); // Amazake - entity tick breakdown
          if (this.isMergable()) {
              double radius = this.level().spigotConfig.itemMerge; // Spigot
              for (ItemEntity itemEntity : this.level()
@@ -12,7 +12,7 @@
                  }
              }
          }
-+        ink.hoka.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
++        core.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
      }
  
      private boolean isMergable() {

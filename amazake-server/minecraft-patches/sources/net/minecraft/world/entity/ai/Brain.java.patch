@@ -4,9 +4,9 @@
  
      public void tick(ServerLevel level, E entity) {
          this.forgetOutdatedMemories();
-+        final int amazake$p = ink.hoka.amazake.tick.EntityTickStats.enter(ink.hoka.amazake.tick.EntityTickStats.SENSORS); // Amazake - entity tick breakdown
++        final int amazake$p = core.amazake.tick.EntityTickStats.enter(core.amazake.tick.EntityTickStats.SENSORS); // Amazake - entity tick breakdown
          this.tickSensors(level, entity);
-+        ink.hoka.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
++        core.amazake.tick.EntityTickStats.exit(amazake$p); // Amazake - entity tick breakdown
          this.startEachNonRunningBehavior(level, entity);
          this.tickEachRunningBehavior(level, entity);
      }

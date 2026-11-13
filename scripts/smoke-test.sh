@@ -167,7 +167,7 @@ else
 fi
 reload_check 'Системы: система AmazakeTab [0-9.]+ включена\.' "AmazakeTab enabled after /reload"
 reload_check 'AmazakeTab .*1\.[0-9.]+ .*включена' "/amazake systems after /reload lists AmazakeTab as enabled"
-if grep -nE 'at ink\.hoka\.amazake\.systems|Не удалось включить систему|ошибка при (выключении|перезагрузке) системы' server.log; then
+if grep -nE 'at core\.amazake\.systems|Не удалось включить систему|ошибка при (выключении|перезагрузке) системы' server.log; then
   echo "FOUND: an exception or error from AmazakeSystems"; fail=1
 else
   echo "ok: no exception from AmazakeSystems"
@@ -272,10 +272,10 @@ if [ -n "$stress_jar" ]; then
   stress_check 'Races: [1-9][0-9]* checks, 0 violations, 0 exceptions' "the races module checked its invariants: no race"
   if grep -nE 'Race check failed' stress.log; then echo "FOUND: a race in the races module"; fail=1; fi
   # A module that throws is disabled and logged at SEVERE with its stack trace; any trace through the plugin fails.
-  if grep -nE 'at ink\.hoka\.amazake\.stress\.|Module [a-z]+ failed in |\[[a-z]+\] task failed|Cannot create module' server.log; then
-    echo "FOUND: an exception from ink.hoka.amazake.stress"; fail=1
+  if grep -nE 'at core\.amazake\.stress\.|Module [a-z]+ failed in |\[[a-z]+\] task failed|Cannot create module' server.log; then
+    echo "FOUND: an exception from core.amazake.stress"; fail=1
   else
-    echo "ok: no exception from ink.hoka.amazake.stress"
+    echo "ok: no exception from core.amazake.stress"
   fi
   sid=$(grep -oE "AmazakeStress.*127\.0\.0\.1:$site_port/r/[A-Za-z0-9]+" stress.log | tail -1 | sed 's|.*/r/||' || true)
   if [ -z "$sid" ] || [ "$sid" = "$amazake_id" ]; then

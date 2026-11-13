@@ -4,13 +4,13 @@
              DefaultPermissions.registerCorePermissions();
              CraftDefaultPermissions.registerCorePermissions();
              if (!io.papermc.paper.configuration.GlobalConfiguration.get().misc.loadPermissionsYmlBeforePlugins) this.loadCustomPermissions(); // Paper
-+            ink.hoka.amazake.systems.SystemManager.startup(); // Amazake - systems: enabled after plugins
++            core.amazake.systems.SystemManager.startup(); // Amazake - systems: enabled after plugins
              this.syncCommands();
          }
      }
  
      public void disablePlugins() {
-+        ink.hoka.amazake.systems.SystemManager.shutdown(); // Amazake - systems: disabled before plugins
++        core.amazake.systems.SystemManager.shutdown(); // Amazake - systems: disabled before plugins
          this.pluginManager.disablePlugins();
      }
  
@@ -18,7 +18,7 @@
          }
  
          Plugin[] pluginClone = pluginManager.getPlugins().clone(); // Paper
-+        ink.hoka.amazake.systems.SystemManager.shutdown(); // Amazake - systems: disabled before plugins on /reload
++        core.amazake.systems.SystemManager.shutdown(); // Amazake - systems: disabled before plugins on /reload
          this.commandMap.clearCommands(); // Paper - Move command reloading up
          this.pluginManager.clearPlugins();
          // Paper - move up

@@ -5,7 +5,7 @@
      }
  
 +    // Amazake start - systems in /pl
-+    private static Component formatSystem(final ink.hoka.amazake.systems.SystemManager.Overview system) {
++    private static Component formatSystem(final core.amazake.systems.SystemManager.Overview system) {
 +        final TextComponent.Builder hover = Component.text()
 +            .append(Component.text(system.name() + " " + system.version(), NamedTextColor.WHITE))
 +            .append(Component.newline())
@@ -32,11 +32,11 @@
          }
  
 +        // Amazake start - systems in /pl
-+        final List<ink.hoka.amazake.systems.SystemManager.Overview> amazakeSystems = ink.hoka.amazake.systems.SystemManager.overview();
++        final List<core.amazake.systems.SystemManager.Overview> amazakeSystems = core.amazake.systems.SystemManager.overview();
 +        if (!amazakeSystems.isEmpty()) {
 +            sender.sendMessage(header("AmazakeSystems", 0xDC143C, amazakeSystems.size(), true));
 +            final List<Component> systemNames = new ArrayList<>(amazakeSystems.size());
-+            for (final ink.hoka.amazake.systems.SystemManager.Overview system : amazakeSystems) {
++            for (final core.amazake.systems.SystemManager.Overview system : amazakeSystems) {
 +                systemNames.add(formatSystem(system));
 +            }
 +            boolean firstLine = true;
