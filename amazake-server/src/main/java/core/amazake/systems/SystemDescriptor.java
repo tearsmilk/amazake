@@ -126,9 +126,9 @@ public record SystemDescriptor(SystemInfo info, List<String> conflicts) {
         final String apiVersion = required(map, "api-version");
         if (!SUPPORTED_API_VERSIONS.contains(apiVersion)) {
             final InvalidException e = new InvalidException("api-version " + apiVersion + " не поддерживается этим ядром (поддерживается: "
-                + String.join(", ", SUPPORTED_API_VERSIONS) + ");
+                + String.join(", ", SUPPORTED_API_VERSIONS) + "); обновите Amazake или возьмите подходящую версию системы");
             e.outdatedApi = olderThanSupported(apiVersion);
-            throw e; обновите Amazake или возьмите подходящую версию системы");
+            throw e;
         }
         final Object rawDescription = map.get("description");
         final String description = rawDescription == null ? "" : String.valueOf(rawDescription).trim();
