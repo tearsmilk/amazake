@@ -3,7 +3,7 @@ version: '${version}'
 main: ink.hoka.amazake.stress.StressPlugin
 api-version: '1.21'
 description: Воспроизводимый стресс-тест сервера Paper 1.21.11 для сравнения форков (Leaf, Amazake и др.)
-authors: [Amazake]
+authors: [tearsmilk]
 website: https://mc-ru.org
 load: POSTWORLD
 folia-supported: false

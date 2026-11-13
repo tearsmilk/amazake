@@ -115,6 +115,7 @@ fail=0
 check() { if grep -qE "$1" server.log; then echo "ok: $2"; else echo "MISSING: $2"; fail=1; fi; }
 check 'This server is running Amazake' "/version names Amazake"
 check 'Amazake 1\.21\.11' "/amazake version answers"
+check "Автор: tearsmilk" "/amazake version shows the author"
 check 'Loaded amazake\.yml' "amazake.yml is read"
 check 'Reloaded amazake\.yml' "/amazake reload works"
 check 'Plugin lock: on \(plugin-threading\.mode: global-lock\)' "/amazake reload turned the plugin lock on"

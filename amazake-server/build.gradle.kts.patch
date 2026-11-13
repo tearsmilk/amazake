@@ -67,7 +67,7 @@
 -            "Specification-Vendor" to "Paper Team",
 -            "Brand-Id" to "papermc:paper",
 -            "Brand-Name" to "Paper",
-+            "Specification-Vendor" to "Amazake", // Amazake - rebrand
++            "Specification-Vendor" to "tearsmilk", // Amazake - rebrand
 +            "Brand-Id" to "tearsmilk:amazake", // Amazake - rebrand
 +            "Brand-Name" to "Amazake", // Amazake - rebrand
              "Build-Number" to (build ?: ""),

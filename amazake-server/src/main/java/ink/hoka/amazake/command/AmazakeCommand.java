@@ -47,6 +47,7 @@ public final class AmazakeCommand extends Command {
         switch (sub) {
             case "version" -> {
                 sender.sendMessage(text(Amazake.versionLine(), GOLD));
+                sender.sendMessage(text("Автор: " + Amazake.AUTHOR, GRAY));
                 sender.sendMessage(text(Amazake.REPOSITORY, GRAY));
             }
             case "reload" -> {

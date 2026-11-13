@@ -24,6 +24,8 @@ public final class AmazakeVersionFetcher implements VersionFetcher {
         return text()
             .append(text(Amazake.versionLine(), NamedTextColor.WHITE))
             .append(Component.newline())
+            .append(text("Автор: " + Amazake.AUTHOR, NamedTextColor.GRAY))
+            .append(Component.newline())
             .append(text("Builds and source: ", NamedTextColor.GRAY))
             .append(text(Amazake.REPOSITORY, NamedTextColor.GOLD).clickEvent(ClickEvent.openUrl(Amazake.REPOSITORY)))
             .build();

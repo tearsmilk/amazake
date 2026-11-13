@@ -6,6 +6,7 @@ import io.papermc.paper.ServerBuildInfo;
 public final class Amazake {
 
     public static final String NAME = "Amazake";
+    public static final String AUTHOR = "tearsmilk";
     public static final String REPOSITORY = "https://github.com/tearsmilk/amazake";
 
     private Amazake() {

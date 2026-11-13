@@ -99,7 +99,7 @@ public final class AmazakeConfig {
         if (firstStart) {
             LOGGER.info("*************************************************************************************");
             LOGGER.info("This is the first time Amazake starts in this folder: it wrote " + FILE_NAME + ".");
-            LOGGER.info("Builds, source and documentation: " + Amazake.REPOSITORY);
+            LOGGER.info("Author: " + Amazake.AUTHOR + ". Builds, source and documentation: " + Amazake.REPOSITORY);
             LOGGER.info("*************************************************************************************");
         }
         if (file.isFile()) {
