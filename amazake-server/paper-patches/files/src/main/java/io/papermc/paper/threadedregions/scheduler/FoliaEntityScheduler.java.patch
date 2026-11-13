@@ -1,9 +1,10 @@
 --- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaEntityScheduler.java
 +++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaEntityScheduler.java
-@@ -28,11 +_,14 @@
+@@ -28,11 +_,16 @@
                  // don't execute if the plugin is disabled
                  return;
              }
++            final long amazake$lock = ink.hoka.amazake.threading.PluginLock.active() ? ink.hoka.amazake.threading.PluginLock.lock(plugin) : ink.hoka.amazake.threading.PluginLock.NOT_LOCKED; // Amazake - plugin lock
 +            final int amazake$token = ink.hoka.amazake.plugin.PluginTickStats.enter(plugin, ink.hoka.amazake.plugin.PluginTickStats.TASKS); // Amazake - plugin tick breakdown
              try {
                  runnable.run();
@@ -12,6 +13,7 @@
 -            }
 +            } finally { // Amazake - plugin tick breakdown
 +                ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
++                ink.hoka.amazake.threading.PluginLock.unlock(amazake$lock); // Amazake - plugin lock
 +            } // Amazake - plugin tick breakdown
          };
      }

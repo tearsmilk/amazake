@@ -216,6 +216,7 @@ class EntityTickStatsTest {
 
     @Test
     void aThrownEntityTickStopsRecordingAtTheLatestByTheLoopEnd() {
+        EntityTickStats.acquire(); // abortEntity() only acts while recording (one volatile read otherwise)
         EntityTickStats.ensureTypes(NAMES.length);
         EntityTickStats.beginAt(ZOMBIE, EntityTickStats.MOB, 0L);
         EntityTickStats.enterAt(EntityTickStats.MOVE, 1 * MS); // the tick throws here: no exit, no endAt
@@ -261,5 +262,80 @@ class EntityTickStatsTest {
         assertTrue(EntityTickStats.enabled());
         EntityTickStats.release();
         assertFalse(EntityTickStats.enabled());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void threadsRecordIntoTheirOwnRecordersAndSnapshotsSumThem() throws Exception {
+        final int threads = 4;
+        final int entities = 20_000;
+        final java.util.concurrent.CyclicBarrier start = new java.util.concurrent.CyclicBarrier(threads);
+        final java.util.List<Throwable> errors = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        final Thread[] workers = new Thread[threads];
+        for (int t = 0; t < threads; t++) {
+            final int type = t % 2 == 0 ? ZOMBIE : ITEM;
+            final int cls = t % 2 == 0 ? EntityTickStats.MOB : EntityTickStats.OTHER;
+            workers[t] = new Thread(() -> {
+                try {
+                    start.await();
+                    // Each entity: 1 ms base, 2 ms goals nested with 1 ms pathfind (own fake clock per thread).
+                    long now = 0L;
+                    for (int i = 0; i < entities; i++) {
+                        EntityTickStats.beginAt(type, cls, now);
+                        final int goals = EntityTickStats.enterAt(EntityTickStats.GOALS, now += MS);
+                        final int path = EntityTickStats.enterAt(EntityTickStats.PATHFIND, now += MS);
+                        EntityTickStats.exitAt(path, now += MS);
+                        EntityTickStats.exitAt(goals, now += MS);
+                        EntityTickStats.endAt(i % 4 != 0, now);
+                    }
+                    EntityTickStats.addLoopNanos(EntityTickStats.LOOP, 7L);
+                } catch (final Throwable e) {
+                    errors.add(e);
+                }
+            }, "entity-recorder-" + t);
+            workers[t].start();
+        }
+        for (final Thread worker : workers) {
+            worker.join();
+        }
+        assertTrue(errors.isEmpty(), errors.toString());
+
+        final Map<String, Object> snap = EntityTickStats.snapshot(0L, NAMES);
+        final long perType = (long) entities * (threads / 2);
+        for (final int type : new int[]{ZOMBIE, ITEM}) {
+            assertEquals(perType, ((long[]) snap.get("typeTicks"))[type]);
+            assertEquals(perType / 4, ((long[]) snap.get("typeInactive"))[type]);
+            assertEquals(perType * 4 * MS, ((long[]) snap.get("typeNanos"))[type]);
+            final long[] p = ((long[][]) snap.get("typePhaseNanos"))[type];
+            assertEquals(perType * MS, p[EntityTickStats.BASE]);
+            assertEquals(perType * 2 * MS, p[EntityTickStats.GOALS]);
+            assertEquals(perType * MS, p[EntityTickStats.PATHFIND]);
+        }
+        assertEquals(EntityTickStats.MOB, ((byte[]) snap.get("typeClass"))[ZOMBIE]);
+        assertEquals(EntityTickStats.OTHER, ((byte[]) snap.get("typeClass"))[ITEM]);
+        assertEquals(7L * threads, ((long[]) snap.get("loopNanos"))[EntityTickStats.LOOP]);
+        // The test thread never recorded: its own state is untouched.
+        assertFalse(EntityTickStats.recording());
+    }
+
+    @Test
+    void aThreadInTheMiddleOfAnEntityDoesNotDisturbAnother() throws Exception {
+        EntityTickStats.ensureTypes(NAMES.length);
+        EntityTickStats.beginAt(ZOMBIE, EntityTickStats.MOB, 0L);
+        final int goals = EntityTickStats.enterAt(EntityTickStats.GOALS, 1 * MS);
+        final Thread other = new Thread(() -> {
+            EntityTickStats.beginAt(VILLAGER, EntityTickStats.MOB, 100 * MS);
+            EntityTickStats.enterAt(EntityTickStats.BRAIN, 101 * MS); // left open on purpose
+            EntityTickStats.endAt(true, 105 * MS);
+        });
+        other.start();
+        other.join();
+        assertTrue(EntityTickStats.recording()); // this thread's entity is still open
+        EntityTickStats.exitAt(goals, 3 * MS);
+        EntityTickStats.endAt(true, 4 * MS);
+        assertEquals(2 * MS, phases(ZOMBIE)[EntityTickStats.GOALS]);
+        assertEquals(2 * MS, phases(ZOMBIE)[EntityTickStats.BASE]);
+        assertEquals(4 * MS, phases(VILLAGER)[EntityTickStats.BRAIN]);
+        assertEquals(1 * MS, phases(VILLAGER)[EntityTickStats.BASE]);
     }
 }

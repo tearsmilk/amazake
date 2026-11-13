@@ -1,5 +1,37 @@
 # План многопоточности: что патчить в Minecraft
 
+## Выбранный путь
+
+Из вариантов «перенести регионный тик ShreddedPaper на нашу базу Paper», «пересесть на ShreddedPaper (и Purpur)»,
+«перенести регионы Folia» и «только параллельные миры» выбран первый: переносим регионный тик ShreddedPaper
+по шагам. Каждый шаг — за переключателем в `amazake.yml`, по умолчанию выключен, и
+включается только после AmazakeStress. Старые плагины, которые синхронно трогают чужой регион, получают
+исключение (никогда — тихую гонку). Игроки на целевом сервере разбросаны по миру, поэтому регионы окупаются.
+
+1. **Подготовка (ничего не меняет, пока многопоточность выключена).** Секции `multithreading` и
+   `plugin-threading` в `AmazakeConfig`. Класс `ink.hoka.amazake.threading.PluginLock`: одна общая
+   реентерабельная блокировка на весь код плагинов, не готовых к многопоточности, — на всю раздачу синхронного
+   события (`PaperEventManager#callEvent`), на каждую синхронную задачу (`CraftScheduler#mainThreadHeartbeat`,
+   `FoliaGlobalRegionScheduler`, `FoliaEntityScheduler`) и на команды плагинов и их автодополнение
+   (`BukkitCommandNode`). Без блокировки работают плагины с `folia-supported: true`, из `thread-safe`, кроме
+   `force-locked`. `EntityTickStats` и `PluginTickStats` пишут в счётчики своего потока (`ThreadLocal`), снимок
+   их суммирует; в отчёте профайлера появились `plugins[].lockWaitMsPerTick` и `plugins.lockHeldMsPerTick`.
+   Модуль `races` в AmazakeStress проверяет, что код плагина не исполняется в двух потоках сразу.
+2. **`multithreading.mode: worlds`.** Каждый мир тикает в своём потоке, общий барьер в
+   `MinecraftServer#tickChildren` (форма `tickAsync` из ShreddedPaper). Общее состояние делается
+   потокобезопасным: поля захвата в `Level`, `PlayerList`, табло, карты, `DimensionDataStorage`; переходы между
+   мирами — через отложенную передачу. Проверка: AmazakeStress с нагрузкой в трёх мирах.
+3. **`multithreading.mode: regions`.** Ядро ShreddedPaper: регионы фиксированного размера
+   (`multithreading.region-size`) под замками 3×3, планировщик регионов, тикер чанков, прокси тиков блоков,
+   `TickThread#isTickThreadFor` по регионам, пакеты игроков в поток их региона, `RegionScheduler`. Затем
+   проверки на чужой регион, дюп через общий GUI, тест на взаимную блокировку и матрица популярных плагинов
+   (LuckPerms, Vault+Essentials, WorldGuard, PlaceholderAPI+TAB, ProtocolLib, CoreProtect).
+4. **Дополнения из Folia (по желанию).** `/tps` и профайлер по регионам, дамп стека зависшего региона в
+   watchdog, ограничение одновременных входов. Подавление обновлений блоков на границах регионов (патч Folia
+   №4) не берём: оно меняет ванильное поведение.
+
+Ниже — исходная карта точек входа в коде Minecraft; она остаётся справочником для шагов 2–4.
+
 Карта следующих шагов Amazake, для которых нужны патчи к коду Minecraft (`amazake-server/minecraft-patches/`).
 Сейчас в Amazake есть только раскладка ядер и профайлер: оба живут в `amazake-server/src/main/java/ink/hoka/amazake/`
 и не трогают тик. Всё, что ниже, меняет сам тик, поэтому каждая фича получает переключатель в `amazake.yml`,

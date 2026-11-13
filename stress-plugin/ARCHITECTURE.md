@@ -50,6 +50,7 @@ Fixed files and public shape (do not rename; registry calls `XModule::new` with 
 | `chunks` | `ink.hoka.amazake.stress.chunks.ChunksModule` | `public ChunksModule(StressPlugin plugin)` | `Stage.CHUNKS` | 3 |
 | `packets` | `ink.hoka.amazake.stress.packets.PacketsModule` | `public PacketsModule(StressPlugin plugin)` | `Stage.PACKETS` | 4 |
 | `async` | `ink.hoka.amazake.stress.async.AsyncLoadModule` | `public AsyncLoadModule(StressPlugin plugin)` | `Stage.PACKETS` | 5 |
+| `races` | `ink.hoka.amazake.stress.races.RacesModule` | `public RacesModule(StressPlugin plugin)` | `Stage.PACKETS` | 6 |
 
 Profiler: `ink.hoka.amazake.stress.profiler.StressProfiler` — `public StressProfiler(StressPlugin plugin)`,
 implements `ProfilerBridge` (placeholder answers «профайлер ещё не подключён»).

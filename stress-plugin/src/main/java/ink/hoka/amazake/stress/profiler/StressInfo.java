@@ -5,6 +5,7 @@ import ink.hoka.amazake.stress.Stage;
 import ink.hoka.amazake.stress.StageRunner;
 import ink.hoka.amazake.stress.StressConfig;
 import ink.hoka.amazake.stress.StressPlugin;
+import ink.hoka.amazake.stress.races.RacesModule;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,7 +30,9 @@ import org.jspecify.annotations.Nullable;
  *   "finished": bool, "endReason": string | null,
  *   "stageResults": [ { "stage", "ticks", "seconds", "tps", "msptAvg", "msptP95", "msptP99", "msptMax", "lagTicks",
  *                       "entities" (optional) } ],
- *   "modules": [ { "id", "failed", "failure", "status" } ]
+ *   "modules": [ { "id", "failed", "failure", "status" } ],
+ *   "races": { "checks", "invariants", "violations", "exceptions", "concurrentModifications", "counted", "transfers",
+ *              "details", "events", "probes", "offMainEvents", "offMainThreads", "listeners" } (only if the races module ran)
  * }
  * </pre>
  *
@@ -128,6 +131,7 @@ final class StressInfo {
         out.put("stageResults", results);
 
         final List<Map<String, Object>> handles = new ArrayList<>();
+        Map<String, Object> races = null;
         for (final StageRunner.Handle handle : run.handles()) {
             final Map<String, Object> h = new LinkedHashMap<>();
             h.put("id", handle.id());
@@ -141,8 +145,14 @@ final class StressInfo {
             }
             h.put("status", status);
             handles.add(h);
+            if (handle.module() instanceof RacesModule r) {
+                races = r.report();
+            }
         }
         out.put("modules", handles);
+        if (races != null) {
+            out.put("races", races);
+        }
         return out;
     }
 

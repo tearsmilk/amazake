@@ -11,7 +11,7 @@ import org.bukkit.command.TabCompleter;
 import org.jspecify.annotations.Nullable;
 
 /**
- * /stress start [all|mobs|physics|redstone|chunks|packets|async] [seconds]
+ * /stress start [all|mobs|physics|redstone|chunks|packets|async|races] [seconds]
  * /stress run [all|module] [seconds] (like start, plus the built-in profiler for exactly the run, report uploaded at the end)
  * /stress stop | status | cleanup confirm | profile [seconds|stop]
  */

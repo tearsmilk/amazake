@@ -198,3 +198,17 @@ modules:
     sync-tasks: 1
     sync-ms-per-task: 0.2
     sync-max-ms-total: 1.0
+
+  races:
+    enabled: true
+    listen:
+      entity-move: true
+      block-physics: true
+      entity-target: true
+      player-move: true
+    sync-tasks: 2
+    probe-events-per-task: 5
+    transfers-per-task: 10
+    accounts: 16
+    log-cap: 1024
+    check-interval-ticks: 20

@@ -4,11 +4,11 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadMXBean;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.LongAdder;
 import org.bukkit.plugin.Plugin;
 
@@ -22,8 +22,15 @@ import org.bukkit.plugin.Plugin;
  *
  * <p>Main-thread times are self times: entering a plugin's code charges the time since the last stamp to the
  * plugin and kind on top of a small stack, so a listener fired from another plugin's task is charged to the
- * listener's plugin only. All main-thread recording runs on the tick thread without locks; the async
- * counters are concurrent.</p>
+ * listener's plugin only. Recording happens on any tick thread ({@code TickThread}: today the server thread
+ * and Paper's watchdog, later the region threads). Each thread records into its own {@link Recorder} (its own
+ * stack, stamp and counters, no locks); {@link #snapshot()} sums all recorders. The snapshot reads other
+ * threads' plain long counters without synchronisation: on a 64-bit JVM such a read never tears, it can only
+ * miss the last few increments, and snapshots are taken at tick boundaries where the writers are idle anyway.
+ * The async counters are concurrent.</p>
+ *
+ * <p>With {@link ink.hoka.amazake.threading.PluginLock} active it also records, per plugin, how long threads
+ * waited for the lock before running that plugin's code, and how long the lock was held in all.</p>
  *
  * <p>The reading API uses only plain Java types, so a plugin can reach it through reflection.</p>
  */
@@ -47,17 +54,16 @@ public final class PluginTickStats {
     /** Null until the first async measurement checks whether per-thread CPU time is available. */
     private static volatile Boolean threadCpuSupported;
 
-    // ---- tick-thread state (plain fields: only the tick thread touches them) ----
-    /** By plugin name, not by Plugin: holding Plugin objects would keep a disabled or reloaded plugin's class loader alive. */
-    private static final HashMap<String, Integer> INDEX = new HashMap<>();
-    private static String[] names = new String[0];
-    private static long[][] nanos = new long[0][];
-    private static long[] calls = new long[0];
-    private static long stamp;
-    /** Frame i (1..depth) is plugin STACK_PLUGIN[i] doing STACK_KIND[i]; frame 0 is "no plugin". */
-    private static final int[] STACK_PLUGIN = new int[STACK_CAPACITY];
-    private static final int[] STACK_KIND = new int[STACK_CAPACITY];
-    private static int depth;
+    // ---- recording state (per thread, see Recorder) ----
+    /** Plugin slots by plugin name, not by Plugin: holding Plugin objects would keep a disabled or reloaded plugin's class loader alive. */
+    private static final ConcurrentHashMap<String, Integer> INDEX = new ConcurrentHashMap<>();
+    /** Slot -> plugin name; replaced (copy on write) under {@link #INDEX_LOCK} when a slot is added. */
+    private static volatile String[] names = new String[0];
+    private static final Object INDEX_LOCK = new Object();
+    /** Every recorder ever created, also of threads that died: the counters are cumulative. */
+    private static final CopyOnWriteArrayList<Recorder> RECORDERS = new CopyOnWriteArrayList<>();
+    /** The current thread's recorder; no initial value, so a thread that never records creates none. Replaced by resetForTest. */
+    private static ThreadLocal<Recorder> current = new ThreadLocal<>();
 
     // ---- async counters (any thread) ----
     private static final ConcurrentHashMap<String, LongAdder> ASYNC_CPU = new ConcurrentHashMap<>();
@@ -94,22 +100,39 @@ public final class PluginTickStats {
     // ------------------------------------------------------------------------------------------
 
     /**
-     * Starts timing {@code plugin}'s code of {@code kind} on the main thread.
+     * Starts timing {@code plugin}'s code of {@code kind} on the current tick thread.
      *
-     * @return a token for {@link #exit}, or -1 when not recording, off the tick thread or without a plugin
+     * @return a token for {@link #exit}, or -1 when not recording, off a tick thread or without a plugin
      */
     public static int enter(final Plugin plugin, final int kind) {
-        if (!enabled || plugin == null || !onServerThread()) {
+        if (!enabled || plugin == null || !ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
             return -1;
         }
         return enterAt(indexOf(plugin), kind, System.nanoTime());
     }
 
-    /** Ends the code started by {@link #enter}; also pops inner frames whose exit was skipped. */
+    /** Ends the code started by {@link #enter} on the same thread; also pops inner frames whose exit was skipped. */
     public static void exit(final int token) {
         // Not gated by enabled: a frame opened while recording is always closed, even if recording stopped meanwhile.
         if (token >= 0 && token != OVERFLOW_TOKEN) {
             exitAt(token, System.nanoTime());
+        }
+    }
+
+    /**
+     * Charges {@code nanos} of waiting for the plugin lock to {@code plugin} (the plugin whose code was about
+     * to run). Called by PluginLock on a tick thread; does nothing when not recording.
+     */
+    public static void lockWait(final Plugin plugin, final long nanos) {
+        if (enabled && plugin != null && nanos > 0L && ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
+            addLockWait(indexOf(plugin), nanos);
+        }
+    }
+
+    /** Adds {@code nanos} the plugin lock was held (one outermost hold). Called by PluginLock on a tick thread. */
+    public static void lockHeld(final long nanos) {
+        if (enabled && nanos > 0L && ca.spottedleaf.moonrise.common.util.TickThread.isTickThread()) {
+            addLockHeld(nanos);
         }
     }
 
@@ -145,15 +168,6 @@ public final class PluginTickStats {
         }
     }
 
-    /**
-     * Only the server thread records. TickThread.isTickThread() is not enough: Paper's watchdog thread is a
-     * TickThread too and fires plugin events while it stops a hung server, which would race the counters.
-     */
-    private static boolean onServerThread() {
-        final net.minecraft.server.MinecraftServer server = net.minecraft.server.MinecraftServer.getServer();
-        return server != null && Thread.currentThread() == server.getRunningThread();
-    }
-
     // ---- the accounting, with an explicit clock (unit-tested) ----
 
     static int indexOf(final Plugin plugin) {
@@ -162,55 +176,60 @@ public final class PluginTickStats {
         if (known != null) {
             return known;
         }
-        final int index = register(name);
-        INDEX.put(name, index);
-        return index;
+        return INDEX.computeIfAbsent(name, PluginTickStats::register);
     }
 
-    /** A new plugin slot (one per plugin name). */
+    /** A new plugin slot (one per plugin name). Any thread. */
     static int register(final String name) {
-        final int index = names.length;
-        names = Arrays.copyOf(names, index + 1);
-        names[index] = name;
-        nanos = Arrays.copyOf(nanos, index + 1);
-        nanos[index] = new long[KIND_COUNT];
-        calls = Arrays.copyOf(calls, index + 1);
-        return index;
+        synchronized (INDEX_LOCK) {
+            final String[] next = Arrays.copyOf(names, names.length + 1);
+            next[next.length - 1] = name;
+            names = next;
+            return next.length - 1;
+        }
+    }
+
+    /** The current thread's recorder, created (and registered) on first use. */
+    static Recorder recorder() {
+        final ThreadLocal<Recorder> local = current;
+        Recorder recorder = local.get();
+        if (recorder == null) {
+            recorder = new Recorder(Thread.currentThread().getName());
+            local.set(recorder);
+            RECORDERS.add(recorder);
+        }
+        return recorder;
     }
 
     static int enterAt(final int plugin, final int kind, final long now) {
-        charge(now);
-        calls[plugin]++;
-        if (depth + 1 >= STACK_CAPACITY) {
-            return OVERFLOW_TOKEN; // its time stays with the current top
-        }
-        final int token = depth;
-        depth++;
-        STACK_PLUGIN[depth] = plugin;
-        STACK_KIND[depth] = kind;
-        return token;
+        return recorder().enterAt(plugin, kind, now);
     }
 
     static void exitAt(final int token, final long now) {
-        charge(now);
-        if (token < depth) {
-            depth = token;
+        final Recorder recorder = current.get();
+        if (recorder != null) {
+            recorder.exitAt(token, now);
         }
     }
 
-    private static void charge(final long now) {
-        if (depth > 0) {
-            nanos[STACK_PLUGIN[depth]][STACK_KIND[depth]] += now - stamp;
-        }
-        stamp = now;
+    static void addLockWait(final int plugin, final long nanos) {
+        final Recorder recorder = recorder();
+        recorder.ensure(plugin);
+        recorder.lockWait[plugin] += nanos;
+    }
+
+    static void addLockHeld(final long nanos) {
+        recorder().lockHeld += nanos;
     }
 
     static void addAsync(final String name, final long cpuNanos) {
         ASYNC_CPU.computeIfAbsent(name, n -> new LongAdder()).add(cpuNanos);
     }
 
+    /** The current thread's stack depth (0 = no plugin code open). */
     static int depth() {
-        return depth;
+        final Recorder recorder = current.get();
+        return recorder == null ? 0 : recorder.depth;
     }
 
     /** Test only: forget everything. */
@@ -221,10 +240,8 @@ public final class PluginTickStats {
         enabled = false;
         INDEX.clear();
         names = new String[0];
-        nanos = new long[0][];
-        calls = new long[0];
-        depth = 0;
-        stamp = 0L;
+        RECORDERS.clear();
+        current = new ThreadLocal<>();
         ASYNC_CPU.clear();
     }
 
@@ -232,26 +249,58 @@ public final class PluginTickStats {
     // Reading
     // ------------------------------------------------------------------------------------------
 
-    /** A consistent copy of the counters. Main thread only. */
+    /**
+     * A copy of the counters, all threads' recorders summed. Any thread; meant to be taken on the server
+     * thread at a tick boundary (see the class comment on reading other threads' counters).
+     */
     public static Map<String, Object> snapshot() {
-        return snapshot(net.minecraft.server.MinecraftServer.currentTick, System.nanoTime());
+        return snapshot(net.minecraft.server.MinecraftServer.currentTick, System.nanoTime(),
+            ink.hoka.amazake.threading.PluginLock.active());
     }
 
     static Map<String, Object> snapshot(final long tick, final long wallNanos) {
-        final int n = names.length;
-        final long[][] copy = new long[n][];
-        for (int i = 0; i < n; i++) {
-            copy[i] = nanos[i].clone();
+        return snapshot(tick, wallNanos, false);
+    }
+
+    static Map<String, Object> snapshot(final long tick, final long wallNanos, final boolean lockActive) {
+        final String[] slots = names;
+        final int n = slots.length;
+        final long[][] sumNanos = new long[n][KIND_COUNT];
+        final long[] sumCalls = new long[n];
+        final long[] sumWait = new long[n];
+        long held = 0L;
+        for (final Recorder recorder : RECORDERS) {
+            final long[][] nanos = recorder.nanos;
+            final long[] calls = recorder.calls;
+            final long[] wait = recorder.lockWait;
+            for (int i = 0; i < n; i++) {
+                if (i < nanos.length) {
+                    final long[] kinds = nanos[i];
+                    for (int k = 0; k < KIND_COUNT; k++) {
+                        sumNanos[i][k] += kinds[k];
+                    }
+                }
+                if (i < calls.length) {
+                    sumCalls[i] += calls[i];
+                }
+                if (i < wait.length) {
+                    sumWait[i] += wait[i];
+                }
+            }
+            held += recorder.lockHeld;
         }
         final Map<String, Long> async = new LinkedHashMap<>();
         ASYNC_CPU.forEach((name, adder) -> async.put(name, adder.sum()));
         final Map<String, Object> out = new LinkedHashMap<>();
         out.put("tick", tick);
         out.put("wallNanos", wallNanos);
-        out.put("names", names.clone());
-        out.put("nanos", copy);
-        out.put("calls", calls.clone());
+        out.put("names", slots.clone());
+        out.put("nanos", sumNanos);
+        out.put("calls", sumCalls);
         out.put("asyncCpuNanos", async);
+        out.put("lockWaitNanos", sumWait);
+        out.put("lockHeldNanos", held);
+        out.put("lockActive", lockActive);
         return out;
     }
 
@@ -266,12 +315,16 @@ public final class PluginTickStats {
         }
         final Map<String, Row> rows = rows(from, to);
         final double seconds = Math.max(1e-9, (number(to.get("wallNanos")) - number(from.get("wallNanos"))) / 1e9);
+        final long held = Math.max(0L, number(to.get("lockHeldNanos")) - number(from.get("lockHeldNanos")));
+        // The lock fields are written when the plugin lock was on at either end, or did anything in between.
+        boolean lock = Boolean.TRUE.equals(from.get("lockActive")) || Boolean.TRUE.equals(to.get("lockActive")) || held > 0L;
 
         long total = 0L;
         final List<Row> list = new ArrayList<>();
         for (final Row row : rows.values()) {
             total += row.mainNanos();
-            if (row.mainNanos() > 0L || row.calls > 0L || row.asyncNanos > 0L) {
+            lock |= row.lockWaitNanos > 0L;
+            if (row.mainNanos() > 0L || row.calls > 0L || row.asyncNanos > 0L || row.lockWaitNanos > 0L) {
                 list.add(row);
             }
         }
@@ -291,12 +344,18 @@ public final class PluginTickStats {
             }
             entry.put("callsPerTick", round((double) row.calls / ticks));
             entry.put("asyncCpuMsPerSecond", round(row.asyncNanos / 1_000_000.0 / seconds));
+            if (lock) {
+                entry.put("lockWaitMsPerTick", round(msPerTick(row.lockWaitNanos, ticks)));
+            }
             plugins.add(entry);
         }
 
         final Map<String, Object> out = new LinkedHashMap<>();
         out.put("ticks", ticks);
         out.put("msPerTick", round(msPerTick(total, ticks)));
+        if (lock) {
+            out.put("lockHeldMsPerTick", round(msPerTick(held, ticks)));
+        }
         out.put("plugins", plugins);
         return out;
     }
@@ -321,6 +380,8 @@ public final class PluginTickStats {
         final long[][] fromNanos = from.get("nanos") instanceof long[][] l ? l : new long[0][];
         final long[] toCalls = to.get("calls") instanceof long[] l ? l : new long[0];
         final long[] fromCalls = from.get("calls") instanceof long[] l ? l : new long[0];
+        final long[] toWait = to.get("lockWaitNanos") instanceof long[] l ? l : new long[0];
+        final long[] fromWait = from.get("lockWaitNanos") instanceof long[] l ? l : new long[0];
 
         final Map<String, Row> rows = new LinkedHashMap<>();
         for (int i = 0; i < toNames.length; i++) {
@@ -332,6 +393,7 @@ public final class PluginTickStats {
                 row.nanos[k] += Math.max(0L, at(t, k) - at(f, k));
             }
             row.calls += Math.max(0L, at(toCalls, i) - at(fromCalls, i));
+            row.lockWaitNanos += Math.max(0L, at(toWait, i) - at(fromWait, i));
         }
         final Map<?, ?> toAsync = to.get("asyncCpuNanos") instanceof Map<?, ?> m ? m : Map.of();
         final Map<?, ?> fromAsync = from.get("asyncCpuNanos") instanceof Map<?, ?> m ? m : Map.of();
@@ -375,6 +437,7 @@ public final class PluginTickStats {
         final long[] nanos = new long[KIND_COUNT];
         long calls;
         long asyncNanos;
+        long lockWaitNanos;
 
         Row(final String name) {
             this.name = name;
@@ -386,6 +449,71 @@ public final class PluginTickStats {
                 sum += value;
             }
             return sum;
+        }
+    }
+
+    /**
+     * One thread's recording state and counters. Only its own thread writes it; {@link #snapshot} reads the
+     * counters from other threads (benign races, see the class comment). The array fields are volatile so a
+     * reader that sees a grown array also sees its copied contents.
+     */
+    static final class Recorder {
+        final String threadName;
+        /** Slot -> kind -> self nanos. */
+        volatile long[][] nanos = new long[0][];
+        volatile long[] calls = new long[0];
+        volatile long[] lockWait = new long[0];
+        long lockHeld;
+        private long stamp;
+        /** Frame i (1..depth) is plugin stackPlugin[i] doing stackKind[i]; frame 0 is "no plugin". */
+        private final int[] stackPlugin = new int[STACK_CAPACITY];
+        private final int[] stackKind = new int[STACK_CAPACITY];
+        int depth;
+
+        Recorder(final String threadName) {
+            this.threadName = threadName;
+        }
+
+        void ensure(final int plugin) {
+            if (plugin < this.calls.length) {
+                return;
+            }
+            final int size = Math.max(plugin + 1, names.length);
+            final long[][] grown = Arrays.copyOf(this.nanos, size);
+            for (int i = this.nanos.length; i < size; i++) {
+                grown[i] = new long[KIND_COUNT];
+            }
+            this.nanos = grown;
+            this.lockWait = Arrays.copyOf(this.lockWait, size);
+            this.calls = Arrays.copyOf(this.calls, size); // last: ensure() checks calls.length
+        }
+
+        int enterAt(final int plugin, final int kind, final long now) {
+            this.ensure(plugin);
+            this.charge(now);
+            this.calls[plugin]++;
+            if (this.depth + 1 >= STACK_CAPACITY) {
+                return OVERFLOW_TOKEN; // its time stays with the current top
+            }
+            final int token = this.depth;
+            this.depth++;
+            this.stackPlugin[this.depth] = plugin;
+            this.stackKind[this.depth] = kind;
+            return token;
+        }
+
+        void exitAt(final int token, final long now) {
+            this.charge(now);
+            if (token < this.depth) {
+                this.depth = token;
+            }
+        }
+
+        private void charge(final long now) {
+            if (this.depth > 0) {
+                this.nanos[this.stackPlugin[this.depth]][this.stackKind[this.depth]] += now - this.stamp;
+            }
+            this.stamp = now;
         }
     }
 }

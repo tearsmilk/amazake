@@ -1,15 +1,34 @@
 --- a/src/main/java/io/papermc/paper/command/brigadier/bukkit/BukkitCommandNode.java
 +++ b/src/main/java/io/papermc/paper/command/brigadier/bukkit/BukkitCommandNode.java
-@@ -80,7 +_,12 @@
+@@ -80,7 +_,14 @@
              String[] args = org.apache.commons.lang3.StringUtils.split(content, ' '); // fix adjacent spaces (from console/plugins) causing empty array elements
  
              // Note: we don't return the result of target.execute as thats success / failure, we return handled (true) or not handled (false)
++            final long amazake$lock = ink.hoka.amazake.threading.PluginLock.active() ? ink.hoka.amazake.threading.PluginLock.lockCommand(this.command) : ink.hoka.amazake.threading.PluginLock.NOT_LOCKED; // Amazake - plugin lock
 +            final int amazake$token = ink.hoka.amazake.plugin.PluginTickStats.enabled() && this.command instanceof org.bukkit.command.PluginIdentifiableCommand amazake$owned ? ink.hoka.amazake.plugin.PluginTickStats.enter(amazake$owned.getPlugin(), ink.hoka.amazake.plugin.PluginTickStats.COMMANDS) : -1; // Amazake - plugin tick breakdown
 +            try { // Amazake - plugin tick breakdown
              this.command.execute(sender, this.literal, Arrays.copyOfRange(args, 1, args.length));
 +            } finally { // Amazake - plugin tick breakdown
 +                ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
++                ink.hoka.amazake.threading.PluginLock.unlock(amazake$lock); // Amazake - plugin lock
 +            } // Amazake - plugin tick breakdown
  
              // return true as command was handled
              return 1;
+@@ -105,12 +_,15 @@
+ 
+             List<String> results = null;
+             Location pos = context.getSource().getLocation();
++            final long amazake$lock = ink.hoka.amazake.threading.PluginLock.active() ? ink.hoka.amazake.threading.PluginLock.lockCommand(this.command) : ink.hoka.amazake.threading.PluginLock.NOT_LOCKED; // Amazake - plugin lock
+             try {
+                 results = this.command.tabComplete(sender, this.literal, args, pos.clone());
+             } catch (CommandException ex) {
+                 sender.sendMessage(Component.text("An internal error occurred while attempting to tab-complete this command", NamedTextColor.RED));
+                 Bukkit.getServer().getLogger().log(Level.SEVERE, "Exception when " + sender.getName() + " attempted to tab complete " + builder.getRemaining(), ex);
+-            }
++            } finally { // Amazake - plugin lock
++                ink.hoka.amazake.threading.PluginLock.unlock(amazake$lock); // Amazake - plugin lock
++            } // Amazake - plugin lock
+ 
+             if (sender instanceof final Player player) {
+                 TabCompleteEvent tabEvent = new org.bukkit.event.server.TabCompleteEvent(player, builder.getInput(), results != null ? results : new ArrayList<>(), true, pos); // Paper - AsyncTabCompleteEvent

@@ -996,6 +996,18 @@ td.meter-cell { width: 34%; min-width: 90px; }
 
 .pill-off { color: var(--muted); background: var(--surface-3); }
 
+.pill-bad { color: var(--critical); background: var(--critical-soft); }
+
+/* stress races module result under the stages table */
+.races-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; margin-top: 14px; font-size: 13.5px; }
+.races-text { color: var(--ink-2); flex: 1 1 260px; min-width: 0; }
+.races-details { flex-basis: 100%; margin: 4px 0 0; padding-left: 18px; color: var(--critical); font-size: 12.5px; overflow-wrap: anywhere; }
+
+/* plugins tab: plugin lock card */
+.card-text.muted-text { color: var(--muted); font-size: 13px; }
+.card-text.lock-line.st-warn { color: var(--warning); }
+.card-text.lock-line.st-bad { color: var(--critical); }
+
 .env { font-size: 12.5px; color: var(--ink-2); }
 
 /* --- server tab ------------------------------------------------------ */

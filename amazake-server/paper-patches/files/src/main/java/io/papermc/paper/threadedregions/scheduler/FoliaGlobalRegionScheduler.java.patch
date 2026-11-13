@@ -1,9 +1,10 @@
 --- a/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java
 +++ b/src/main/java/io/papermc/paper/threadedregions/scheduler/FoliaGlobalRegionScheduler.java
-@@ -174,11 +_,13 @@
+@@ -174,11 +_,15 @@
                  return;
              }
  
++            final long amazake$lock = ink.hoka.amazake.threading.PluginLock.active() ? ink.hoka.amazake.threading.PluginLock.lock(this.plugin) : ink.hoka.amazake.threading.PluginLock.NOT_LOCKED; // Amazake - plugin lock
 +            final int amazake$token = ink.hoka.amazake.plugin.PluginTickStats.enter(this.plugin, ink.hoka.amazake.plugin.PluginTickStats.TASKS); // Amazake - plugin tick breakdown
              try {
                  this.run.accept(this);
@@ -11,6 +12,7 @@
                  this.plugin.getLogger().log(Level.WARNING, "Global task for " + this.plugin.getDescription().getFullName() + " generated an exception", throwable);
              } finally {
 +                ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
++                ink.hoka.amazake.threading.PluginLock.unlock(amazake$lock); // Amazake - plugin lock
                  boolean reschedule = false;
                  if (!repeating) {
                      this.setStateVolatile(STATE_FINISHED);

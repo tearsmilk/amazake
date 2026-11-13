@@ -545,6 +545,8 @@
       row.msPerTick = ms !== null ? ms : row.tasks + row.events + row.commands;
       row.callsPerTick = nonNeg(p.callsPerTick);
       row.asyncCpuMsPerSecond = nonNeg(p.asyncCpuMsPerSecond);
+      // Optional (plugin lock): time threads waited for the lock before this plugin's code; null when absent
+      row.lockWaitMsPerTick = nonNeg(p.lockWaitMsPerTick);
       return row;
     }).sort((a, b) => (b.msPerTick - a.msPerTick) || ((b.asyncCpuMsPerSecond || 0) - (a.asyncCpuMsPerSecond || 0)));
     let total = nonNeg(raw.msPerTick);
@@ -555,10 +557,27 @@
       msPerTick: total,
       asyncCpuMsPerSecond: sum(rows.map((r) => r.asyncCpuMsPerSecond || 0)),
       plugins: rows,
+      // Optional plugin-lock fields: hold time of the lock (all threads), the plugins' summed wait; null when absent
+      lockHeldMsPerTick: nonNeg(raw.lockHeldMsPerTick),
+      hasLockWait: rows.some((r) => r.lockWaitMsPerTick !== null),
+      lockWaitMsPerTick: rows.some((r) => r.lockWaitMsPerTick !== null) ? sum(rows.map((r) => r.lockWaitMsPerTick || 0)) : null,
     };
   }
 
-  /** The AmazakeStress plugin's `stress` object: only what the viewer shows (stage results), or null. */
+  /**
+   * The optional `stress.races` object (the races module's invariant checks): counts, plus a few detail lines;
+   * null when absent or without any count.
+   */
+  function normRaces(raw) {
+    if (!isObj(raw)) return null;
+    const count = (v) => { const x = nonNeg(v); return x === null ? null : Math.round(x); };
+    const r = { checks: count(raw.checks), violations: count(raw.violations), exceptions: count(raw.exceptions) };
+    if (r.checks === null && r.violations === null && r.exceptions === null) return null;
+    r.details = arr(raw.details).filter((d) => typeof d === 'string').slice(0, 5).map((d) => cut(d, 200));
+    return r;
+  }
+
+  /** The AmazakeStress plugin's `stress` object: only what the viewer shows (stage results, races), or null. */
   function normStress(raw) {
     if (!isObj(raw)) return null;
     const titles = {};
@@ -581,8 +600,9 @@
         entities: normEntities(s.entities),
       };
     });
-    if (!stages.length) return null;
-    return { plugin: str(raw.plugin, ''), stages: stages };
+    const races = normRaces(raw.races);
+    if (!stages.length && !races) return null;
+    return { plugin: str(raw.plugin, ''), stages: stages, races: races };
   }
 
   /** Russian titles of the AmazakeStress stages, for reports without stageTimeline. */
@@ -2800,6 +2820,7 @@
       value: fmtMsTick(p[k]) + NBSP + 'мс' + (p.msPerTick > 0 ? ' · ' + fmtPct(p[k] / p.msPerTick) : ''),
     }));
     if (p.callsPerTick !== null && p.callsPerTick !== undefined) rows.push({ name: 'Вызовов за тик', value: fmtPerTick(p.callsPerTick) });
+    if (p.lockWaitMsPerTick !== null && p.lockWaitMsPerTick !== undefined) rows.push({ name: 'Ожидание замка', value: fmtMsTick(p.lockWaitMsPerTick) + NBSP + 'мс' });
     return rows;
   }
 
@@ -2855,6 +2876,30 @@
       el('p', { class: 'card-text', text: 'Код плагинов, который трогает мир — синхронные задачи планировщика, слушатели событий, команды, — выполняется в главном потоке, как в обычном Paper. ' +
         'Так задумано: плагины не могут устроить гонку данных с тиком. Зато каждая миллисекунда этого кода прибавляется к тику — таблица ниже показывает, сколько тика берёт каждый плагин.' }),
       el('p', { class: 'card-text', text: where }),
+    ]);
+  }
+
+  /**
+   * «Замок плагинов» (optional plugins.lockHeldMsPerTick / plugins[].lockWaitMsPerTick): how long the plugin lock
+   * was held and how long threads queued for it; null when the report has neither field.
+   */
+  function pluginLockCard(R, P) {
+    if (P.lockHeldMsPerTick === null && !P.hasLockWait) return null;
+    const msptAvg = mean(R.msptAvg);
+    const held = P.lockHeldMsPerTick, wait = P.lockWaitMsPerTick;
+    const parts = [];
+    if (held !== null) parts.push('замок был занят ' + fmtMsTick(held) + NBSP + 'мс/тик' + (msptAvg > 0 ? ' (' + fmtPct(held / msptAvg, held / msptAvg < 0.1 ? 1 : 0) + ' среднего тика)' : ''));
+    if (wait !== null) parts.push('потоки ждали его в сумме ' + fmtMsTick(wait) + NBSP + 'мс/тик');
+    const idle = (held === null || held === 0) && (wait === null || wait === 0);
+    const line = idle
+      ? 'В этом замере замок плагинов не понадобился: весь код плагинов шёл в одном потоке.'
+      : 'В этом замере ' + parts.join(', ') + '.';
+    const status = wait !== null && msptAvg > 0 ? statusLow(wait / msptAvg, 0.05, 0.2) : null;
+    return card({ title: 'Замок плагинов' }, [
+      el('p', { class: 'card-text lock-line' + (status && status !== 'good' ? ' st-' + status : ''), text: line }),
+      el('p', { class: 'card-text muted-text', text: 'Когда мир тикают несколько потоков, код плагинов, не объявивших себя потокобезопасными, выполняется по очереди под общим замком — ' +
+        'как в одном главном потоке, поэтому гонок данных в плагинах нет. «Ожидание замка» в таблице — сколько потоки простояли в очереди перед кодом плагина: ' +
+        'чем оно больше, тем сильнее плагин сдерживает многопоточность.' }),
     ]);
   }
 
@@ -2919,6 +2964,7 @@
 
   function pluginTableCard(R, P) {
     const desc = 'Плагины по времени в главном потоке, самые тяжёлые сверху. «Задачи · события · команды» — из чего состоит это время (наведите на полосу). ' +
+      (P.hasLockWait ? '«Ожидание замка» — сколько потоки ждали замок плагинов перед кодом этого плагина, мс на тик. ' : '') +
       '«Асинхронно» — процессор асинхронных задач планировщика плагина вне тика, в процентах одного ядра.';
     if (!P.plugins.length) {
       return card({ title: 'Плагины', desc: desc }, el('p', { class: 'empty', text: 'За время замера ни один плагин не выполнял измеряемой работы.' }));
@@ -2937,6 +2983,10 @@
       { label: 'Вызовов за тик', cls: 'num opt', render: (p) => fmtPerTick(p.callsPerTick) },
       { label: 'Асинхронно', short: 'Асинхр.', cls: 'num', render: (p) => fmtCorePct(p.asyncCpuMsPerSecond) },
     ];
+    // Optional column: wait for the plugin lock before this plugin's code (only when the server reports it)
+    if (P.hasLockWait) {
+      columns.splice(5, 0, { label: 'Ожидание замка', short: 'Замок', cls: 'num opt', render: (p) => (p.lockWaitMsPerTick === null ? '—' : fmtMsTick(p.lockWaitMsPerTick)) });
+    }
     const t = table(columns, P.plugins.slice(0, PLUGINS_FIRST));
     t.wrap.classList.add('types-table', 'plugins-table');
     const body = [pluginKindLegend(), t.wrap];
@@ -2954,6 +3004,7 @@
     return [
       pluginChips(R, P),
       pluginExplainCard(R),
+      pluginLockCard(R, P),
       pluginTickShareCard(R, P),
       pluginTableCard(R, P),
       pluginTimeCard(R),
@@ -2964,6 +3015,7 @@
   function stressStagesCard(R) {
     const S = R.stress;
     if (!S) return null;
+    if (!S.stages.length) return card({ title: 'Этапы стресс-теста' }, stressRacesEl(S.races));
     const withEnt = S.stages.some((s) => s.entities);
     const entMs = (s, cls) => {
       if (!s.entities) return el('span', { class: 'muted', title: 'Нет данных о сущностях за этот этап', text: '—' });
@@ -2987,7 +3039,26 @@
       title: 'Этапы стресс-теста',
       desc: 'Итоги этапов ' + (S.plugin || 'AmazakeStress') + ': TPS и длительность тика (среднее и 95-й перцентиль, мс)' +
         (withEnt ? '; время мобов и остальных сущностей — если профайлер измерял этап с самого начала, иначе прочерк.' : '.'),
-    }, t.wrap);
+    }, [t.wrap, S.races ? stressRacesEl(S.races) : null]);
+  }
+
+  /** Result line of the stress races module (`stress.races`): green «гонок нет» or red counts with details. */
+  function stressRacesEl(r) {
+    const n = (v) => (v === null ? 0 : v);
+    const bad = n(r.violations) > 0 || n(r.exceptions) > 0;
+    const checks = r.checks === null ? '' : fmtNum(r.checks) + ' ' + plural(r.checks, ['проверка', 'проверки', 'проверок']);
+    const head = bad
+      ? 'Гонки: ' + fmtNum(n(r.violations)) + ' ' + plural(n(r.violations), ['нарушение', 'нарушения', 'нарушений']) +
+        ', ' + fmtNum(n(r.exceptions)) + ' ' + plural(n(r.exceptions), ['исключение', 'исключения', 'исключений'])
+      : 'гонок нет';
+    const text = bad
+      ? 'Модуль races нашёл повреждённые данные плагина' + (checks ? ' (' + checks + ')' : '') + ': его код выполнялся в нескольких потоках одновременно.'
+      : 'Модуль races проверил целостность данных плагина' + (checks ? ' (' + checks + ')' : '') + ': код плагина ни разу не выполнялся в двух потоках сразу.';
+    return el('div', { class: 'races-line' + (bad ? ' races-bad' : '') }, [
+      el('span', { class: 'pill ' + (bad ? 'pill-bad' : 'pill-on'), text: head }),
+      el('span', { class: 'races-text', text: text }),
+      bad && r.details.length ? el('ul', { class: 'races-details mono' }, r.details.map((d) => el('li', { text: d }))) : null,
+    ]);
   }
 
   // ---------------------------------------------------------------------

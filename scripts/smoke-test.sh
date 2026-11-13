@@ -49,6 +49,8 @@ send "version"
 send "amazake version"
 # Point the profiler at the local site, then reload the settings.
 sed -i -E "s|^([[:space:]]*upload-url:).*|\1 http://127.0.0.1:$site_port|" amazake.yml
+# The plugin lock on (one tick thread: never contended), so the stress run below goes through the locked path.
+sed -i -E '/^plugin-threading:/,/^[a-z]/ s|^([[:space:]]+mode:).*|\1 global-lock|' amazake.yml
 send "amazake reload"
 send "amazake cores"
 send "spark tps"
@@ -93,6 +95,7 @@ check 'This server is running Amazake' "/version names Amazake"
 check 'Amazake 1\.21\.11' "/amazake version answers"
 check 'Loaded amazake\.yml' "amazake.yml is read"
 check 'Reloaded amazake\.yml' "/amazake reload works"
+check 'Plugin lock: on \(plugin-threading\.mode: global-lock\)' "/amazake reload turned the plugin lock on"
 check 'TPS from last' "/spark works (bundled spark)"
 check 'first time Amazake starts' "Amazake's first-start message"
 if grep -qE 'papermc\.io/downloads|outdated version of Minecraft|docs\.papermc\.io/paper/next-steps' server.log; then
@@ -198,6 +201,8 @@ if [ -n "$stress_jar" ]; then
       "the AmazakeStress worker threads are found as plugin threads"
   fi
   stress_check 'Run completed \(.*at tick 800/800' "the run went through all 800 ticks and stopped by itself"
+  stress_check 'Races: [1-9][0-9]* checks, 0 violations, 0 exceptions' "the races module checked its invariants: no race"
+  if grep -nE 'Race check failed' stress.log; then echo "FOUND: a race in the races module"; fail=1; fi
   # A module that throws is disabled and logged at SEVERE with its stack trace; any trace through the plugin fails.
   if grep -nE 'at ink\.hoka\.amazake\.stress\.|Module [a-z]+ failed in |\[[a-z]+\] task failed|Cannot create module' server.log; then
     echo "FOUND: an exception from ink.hoka.amazake.stress"; fail=1
@@ -227,9 +232,16 @@ assert s["finished"] is True and s["runTicks"] == 800, (s["finished"], s["runTic
 done = [x["stage"] for x in s["stageResults"]]
 assert done == stages, done
 modules = {m["id"]: m for m in s["modules"]}
-assert sorted(modules) == ["async", "chunks", "mobs", "packets", "physics", "redstone"], sorted(modules)
+assert sorted(modules) == ["async", "chunks", "mobs", "packets", "physics", "races", "redstone"], sorted(modules)
 failed = [m["id"] + ": " + str(m.get("failure")) for m in modules.values() if m["failed"]]
 assert not failed, failed
+# The races module (a deliberately non-thread-safe plugin workload) must see no race: 0 violations, 0 exceptions.
+races = s.get("races")
+assert isinstance(races, dict), "no stress.races block"
+assert races["checks"] >= 3 and races["counted"] > 0 and races["events"] > 0, races
+assert races["violations"] == 0 and races["exceptions"] == 0, races
+print("stress races: %d checks, %d violations, %d exceptions, %d events (%d off-main), %d transfers" % (
+    races["checks"], races["violations"], races["exceptions"], races["events"], races["offMainEvents"], races["transfers"]))
 e = r.get("entities")
 assert isinstance(e, dict), "the stress report has no entities block on Amazake"
 mobs = next(c for c in e["classes"] if c["class"] == "mob")
@@ -262,7 +274,11 @@ row = next((x for x in p["plugins"] if x["name"] == "AmazakeStress"), None)
 assert row is not None, "AmazakeStress missing from plugins: %s" % [x["name"] for x in p["plugins"]]
 assert row["msPerTick"] > 0, row
 assert row["asyncCpuMsPerSecond"] > 0, row
-print("plugins during stress: %.3f ms/tick; AmazakeStress %s" % (p["msPerTick"], row))
+# plugin-threading.mode: global-lock: the lock fields are there; AmazakeStress (folia-supported: false) ran under it.
+assert isinstance(p.get("lockHeldMsPerTick"), (int, float)) and p["lockHeldMsPerTick"] > 0, "lockHeldMsPerTick: %s" % p.get("lockHeldMsPerTick")
+assert all(isinstance(x.get("lockWaitMsPerTick"), (int, float)) for x in p["plugins"]), "plugins[].lockWaitMsPerTick missing"
+assert row["lockWaitMsPerTick"] >= 0, row
+print("plugins during stress: %.3f ms/tick, lock held %.3f ms/tick; AmazakeStress %s" % (p["msPerTick"], p["lockHeldMsPerTick"], row))
 EOF
     then echo "ok: /amazake profile during the run measured AmazakeStress (main thread and async CPU)"; else echo "BAD: the plugins block during the stress run"; fail=1; fi
   fi

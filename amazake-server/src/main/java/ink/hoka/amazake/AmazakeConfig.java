@@ -65,6 +65,23 @@ public final class AmazakeConfig {
     /** cpu.layout.support-nice: nice of support threads on the CPUs plugin threads spill onto; 0: none. */
     public static int cpuLayoutSupportNice = 5;
 
+    /** multithreading.mode as written: off, worlds or regions. */
+    public static String multithreadingMode = "off";
+    /** The mode in effect: only "off" is implemented yet, the others fall back to it with a warning. */
+    public static String multithreadingEffectiveMode = "off";
+    /** multithreading.thread-count: 0 = auto. Parsed, not used yet. */
+    public static int multithreadingThreadCount = 0;
+    /** multithreading.region-size in chunks (a power of two, at least 2). Parsed, not used yet. */
+    public static int multithreadingRegionSize = 8;
+    /** plugin-threading.mode. */
+    public static ink.hoka.amazake.threading.PluginLock.Mode pluginThreadingMode = ink.hoka.amazake.threading.PluginLock.Mode.AUTO;
+    /** plugin-threading.trust-folia-supported. */
+    public static boolean pluginThreadingTrustFoliaSupported = true;
+    /** plugin-threading.thread-safe: plugin names that run without the plugin lock. */
+    public static List<String> pluginThreadingThreadSafe = List.of();
+    /** plugin-threading.force-locked: plugin names always run under the plugin lock. */
+    public static List<String> pluginThreadingForceLocked = List.of();
+
     private AmazakeConfig() {
     }
 
@@ -191,6 +208,8 @@ public final class AmazakeConfig {
             "После переезда следующий - не раньше чем через столько секунд."));
         cpuReserve = new Cores.Reserve(reserveCount, reserveEnabled, reserveCheck, reserveThreshold, reserveCooldown);
 
+        readMultithreading();
+
         try {
             yaml.save(file);
         } catch (final IOException e) {
@@ -199,7 +218,111 @@ public final class AmazakeConfig {
         LOGGER.info("Loaded " + file.getName());
         Cores.configure(cpuLayoutEnabled, cpuLayoutRoles, cpuLayoutResizeChunkPool, cpuLayoutIgnoreProcessorCount, cpuReserve,
             cpuLayoutSupportNice);
+        ink.hoka.amazake.threading.PluginLock.configure(pluginThreadingMode, !"off".equals(multithreadingEffectiveMode),
+            pluginThreadingTrustFoliaSupported, pluginThreadingThreadSafe, pluginThreadingForceLocked);
+        if (ink.hoka.amazake.threading.PluginLock.active()) {
+            LOGGER.info("Plugin lock: on (plugin-threading.mode: " + pluginThreadingMode.key + ")");
+        }
         return true;
+    }
+
+    /** The multithreading and plugin-threading sections (phase 1: parsed; only the plugin lock acts). */
+    private static void readMultithreading() {
+        final String mode = choice("multithreading.mode", "off", List.of("off", "worlds", "regions"),
+            "off - один поток тика, как в Paper. worlds - каждый мир в своём потоке. regions - регионы мира",
+            "в нескольких потоках. worlds и regions ещё не готовы: сервер пишет предупреждение и работает как off.");
+        // The section comment after its first key: setComments ignores a path that does not exist yet.
+        yaml.setComments("multithreading", List.of(
+            "Многопоточный тик (в разработке). Мир делится на регионы, как в Folia, и регионы тикают",
+            "в нескольких потоках. Сейчас готова только подготовка: работает только mode: off."));
+        multithreadingMode = mode;
+        if (!"off".equals(mode)) {
+            LOGGER.warning("multithreading.mode: " + mode + " ещё не готово, работаю как off.");
+        }
+        multithreadingEffectiveMode = "off";
+        multithreadingThreadCount = autoOrNumber("multithreading.thread-count",
+            "Сколько потоков тикают регионы. auto: по раскладке ядер. Пока не используется.");
+        int regionSize = integer("multithreading.region-size", 8,
+            "Размер региона в чанках (сторона квадрата): степень двойки, не меньше 2. Пока не используется.");
+        if (regionSize < 2 || Integer.bitCount(regionSize) != 1) {
+            LOGGER.warning("multithreading.region-size: " + regionSize + " - не степень двойки от 2, взято 8.");
+            regionSize = 8;
+        }
+        multithreadingRegionSize = regionSize;
+
+        final String lockMode = choice("plugin-threading.mode", "auto", List.of("auto", "global-lock", "off"),
+            "auto - блокировка включается, только когда многопоточность включена (multithreading.mode не off).",
+            "global-lock - блокировка всегда (с одним потоком она ничего не меняет, только проверка).",
+            "off - без блокировки: все плагины считаются потокобезопасными (опасно).");
+        yaml.setComments("plugin-threading", List.of(
+            "Как защищать плагины, когда тик идёт в нескольких потоках. Плагины Bukkit рассчитаны на один",
+            "главный поток, поэтому код плагинов, не готовых к многопоточности, выполняется под одной общей",
+            "блокировкой: в каждый момент его выполняет только один поток, и гонок данных у плагина нет."));
+        pluginThreadingMode = ink.hoka.amazake.threading.PluginLock.Mode.parse(lockMode);
+        pluginThreadingTrustFoliaSupported = bool("plugin-threading.trust-folia-supported", true,
+            "Плагины с folia-supported: true в plugin.yml работают без блокировки: они уже рассчитаны на Folia.");
+        pluginThreadingThreadSafe = names("plugin-threading.thread-safe",
+            "Имена плагинов, которые работают без блокировки, например [LuckPerms].");
+        pluginThreadingForceLocked = names("plugin-threading.force-locked",
+            "Имена плагинов, которые всегда работают под блокировкой (важнее двух настроек выше).");
+    }
+
+    /** A text setting with fixed values; an unknown value is warned about and replaced by the default. */
+    private static String choice(final String path, final String def, final List<String> values, final String... comment) {
+        Object value = yaml.get(path);
+        if (Boolean.FALSE.equals(value) && values.contains("off")) {
+            value = "off"; // YAML 1.1 reads an unquoted off as false
+            yaml.set(path, value);
+        }
+        String out = def;
+        if (value != null && values.contains(String.valueOf(value).trim().toLowerCase(java.util.Locale.ROOT))) {
+            out = String.valueOf(value).trim().toLowerCase(java.util.Locale.ROOT);
+        } else {
+            if (value != null) {
+                LOGGER.warning(path + ": \"" + value + "\" - нет такого значения (" + String.join(", ", values) + "), взято " + def + ".");
+            }
+            yaml.set(path, def);
+        }
+        yaml.setComments(path, List.of(comment));
+        return out;
+    }
+
+    /** "auto" (0) or a number of at least 1. */
+    private static int autoOrNumber(final String path, final String... comment) {
+        final Object value = yaml.get(path);
+        int out = 0;
+        if (value instanceof Number number) {
+            out = Math.max(1, number.intValue());
+        } else if (value instanceof String text && !text.trim().equalsIgnoreCase("auto")) {
+            try {
+                out = Math.max(1, Integer.parseInt(text.trim()));
+            } catch (final NumberFormatException e) {
+                LOGGER.warning(path + ": \"" + text.trim() + "\" - не число и не auto, взято auto.");
+            }
+        } else if (!(value instanceof String)) {
+            yaml.set(path, "auto");
+        }
+        yaml.setComments(path, List.of(comment));
+        return out;
+    }
+
+    /** A list of plugin names (a YAML list; a single name is accepted too). */
+    private static List<String> names(final String path, final String... comment) {
+        final Object value = yaml.get(path);
+        final List<String> out = new java.util.ArrayList<>();
+        if (value instanceof List<?> list) {
+            for (final Object item : list) {
+                if (item != null && !String.valueOf(item).isBlank()) {
+                    out.add(String.valueOf(item).trim());
+                }
+            }
+        } else if (value instanceof String text && !text.isBlank()) {
+            out.add(text.trim());
+        } else {
+            yaml.set(path, List.of());
+        }
+        yaml.setComments(path, List.of(comment));
+        return List.copyOf(out);
     }
 
     private static boolean bool(final String path, final boolean def, final String... comment) {

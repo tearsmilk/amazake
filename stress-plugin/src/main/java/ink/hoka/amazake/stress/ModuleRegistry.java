@@ -5,6 +5,7 @@ import ink.hoka.amazake.stress.chunks.ChunksModule;
 import ink.hoka.amazake.stress.mobs.MobsModule;
 import ink.hoka.amazake.stress.packets.PacketsModule;
 import ink.hoka.amazake.stress.physics.PhysicsModule;
+import ink.hoka.amazake.stress.races.RacesModule;
 import ink.hoka.amazake.stress.redstone.RedstoneModule;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -35,6 +36,7 @@ public final class ModuleRegistry {
         registry.register("chunks", Stage.CHUNKS, ChunksModule::new);
         registry.register("packets", Stage.PACKETS, PacketsModule::new);
         registry.register("async", Stage.PACKETS, AsyncLoadModule::new);
+        registry.register("races", Stage.PACKETS, RacesModule::new);
         return registry;
     }
 

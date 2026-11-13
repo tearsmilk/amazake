@@ -5,6 +5,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.entity.Entity;
@@ -16,12 +17,17 @@ import net.minecraft.world.entity.player.Player;
  * Where the entity tick time goes: per entity type, per class (mob, other, player) and per phase
  * (goals, brain, pathfinding, movement, ...), see docs/profiler-format.md {@code entities}.
  *
- * <p>Off by default: the hooks in the Minecraft sources cost one volatile read per entity (and a plain
- * static read per phase) until a consumer calls {@link #acquire()}. Counters are cumulative and never
- * reset; consumers take {@link #snapshot()}s and diff them with {@link #summarize} and {@link #sample}.</p>
+ * <p>Off by default: the hooks in the Minecraft sources cost one volatile read each until a consumer calls
+ * {@link #acquire()}; while recording, a hook costs at most one {@code ThreadLocal.get}. Counters are
+ * cumulative and never reset; consumers take {@link #snapshot()}s and diff them with {@link #summarize}
+ * and {@link #sample}.</p>
  *
- * <p>All recording methods run on the server (tick) thread only, without locks. Phase times are self
- * times: entering a phase charges the time since the last stamp to the phase on top of a small stack.</p>
+ * <p>Entities may tick on several threads (later multithreading phases). Each thread records into its own
+ * {@link Recorder} (its own phase stack, stamp and per-type counters, no locks); {@link #snapshot()} sums all
+ * recorders. It reads other threads' plain long counters without synchronisation: on a 64-bit JVM such a
+ * read never tears, it can only miss the last few increments, and snapshots are taken at tick boundaries.
+ * Phase times are self times: entering a phase charges the time since the last stamp to the phase on top
+ * of a small stack.</p>
  *
  * <p>The reading API uses only plain Java types, so a plugin can reach it through reflection.</p>
  */
@@ -49,23 +55,12 @@ public final class EntityTickStats {
     private static int users;
     private static volatile boolean enabled;
 
-    // ---- tick-thread state (plain fields: only the tick thread touches them) ----
-    /** True between beginEntity and endEntity of an entity that is being recorded. */
-    private static boolean recording;
-    private static int currentType;
-    private static long entityStart;
-    private static long stamp;
-    private static final int[] STACK = new int[STACK_CAPACITY];
-    private static int depth; // index of the top of STACK
-
-    // ---- counters (written by the tick thread, read by snapshot() on the same thread) ----
-    private static final long[] LOOP_NANOS = new long[3];
-    private static long[] typeNanos = new long[0];
-    private static long[] typeTicks = new long[0];
-    private static long[] typeInactive = new long[0];
-    private static long[][] typePhaseNanos = new long[0][];
-    private static byte[] typeClass = new byte[0];
-    private static String[] typeNames;
+    // ---- recording state (per thread, see Recorder) ----
+    /** Every recorder ever created, also of threads that died: the counters are cumulative. */
+    private static final CopyOnWriteArrayList<Recorder> RECORDERS = new CopyOnWriteArrayList<>();
+    /** The current thread's recorder; no initial value, so a thread that never records creates none. Replaced by resetForTest. */
+    private static ThreadLocal<Recorder> current = new ThreadLocal<>();
+    private static volatile String[] typeNames;
 
     private EntityTickStats() {
     }
@@ -95,7 +90,7 @@ public final class EntityTickStats {
     }
 
     // ------------------------------------------------------------------------------------------
-    // Hooks (tick thread)
+    // Hooks (any tick thread; each thread records into its own Recorder)
     // ------------------------------------------------------------------------------------------
 
     /** System.nanoTime(), or 0 when disabled. */
@@ -105,119 +100,110 @@ public final class EntityTickStats {
 
     public static void loopEnd(final int counter, final long start) {
         if (counter == LOOP) {
-            // Runs every tick whatever happened inside: no entity tick is open past the loop.
-            recording = false;
+            // Runs once per world tick whatever happened inside: no entity tick stays open past the loop
+            // (also one that threw while recording stopped, see abortEntity).
+            final Recorder recorder = current.get();
+            if (recorder != null) {
+                recorder.recording = false;
+            }
         }
         if (start != 0L) {
-            LOOP_NANOS[counter] += System.nanoTime() - start;
+            recorder().loopNanos[counter] += System.nanoTime() - start;
         }
     }
 
     public static void beginEntity(final Entity entity) {
         if (!enabled) {
-            recording = false; // an entity tick that threw while recording must not leak past the measurement
-            return;
+            return; // a recording flag left by a thrown tick is cleared by loopEnd(LOOP); enter() checks enabled first
         }
         final int cls = entity instanceof Player ? PLAYER : entity instanceof Mob ? MOB : OTHER;
         final int type = BuiltInRegistries.ENTITY_TYPE.getId(entity.getType());
         if (type < 0) {
             return;
         }
-        if (typeNanos.length == 0) {
-            ensureTypes(BuiltInRegistries.ENTITY_TYPE.size());
+        final Recorder recorder = recorder();
+        if (recorder.typeTicks.length == 0) {
+            recorder.ensureTypes(BuiltInRegistries.ENTITY_TYPE.size());
         }
-        beginAt(type, cls, System.nanoTime());
+        recorder.beginAt(type, cls, System.nanoTime());
     }
 
     public static void endEntity(final boolean active) {
-        if (recording) {
-            endAt(active, System.nanoTime());
+        if (!enabled) {
+            return;
+        }
+        final Recorder recorder = current.get();
+        if (recorder != null && recorder.recording) {
+            recorder.endAt(active, System.nanoTime());
         }
     }
 
     /**
      * Closes the current entity tick without counting it, if one is still open (its tick threw and
-     * {@link #endEntity} was skipped). Called from a finally around the entity tick.
+     * {@link #endEntity} was skipped). Called from a finally around the entity tick. While not recording it
+     * does nothing (one volatile read); a flag it leaves is harmless and cleared by {@link #loopEnd}.
      */
     public static void abortEntity() {
-        recording = false;
+        if (enabled) {
+            final Recorder recorder = current.get();
+            if (recorder != null) {
+                recorder.recording = false;
+            }
+        }
     }
 
     public static int enter(final int phase) {
-        if (!recording) {
+        if (!enabled) {
             return -1;
         }
-        return enterAt(phase, System.nanoTime());
+        final Recorder recorder = current.get();
+        if (recorder == null || !recorder.recording) {
+            return -1;
+        }
+        return recorder.enterAt(phase, System.nanoTime());
     }
 
     public static void exit(final int token) {
-        if (recording && token >= 0 && token != OVERFLOW_TOKEN) {
-            exitAt(token, System.nanoTime());
+        if (token >= 0 && token != OVERFLOW_TOKEN) {
+            final Recorder recorder = current.get();
+            if (recorder != null && recorder.recording) {
+                recorder.exitAt(token, System.nanoTime());
+            }
         }
     }
 
-    // ---- the accounting, with an explicit clock (unit-tested) ----
+    // ---- the accounting on the current thread's recorder, with an explicit clock (unit-tested) ----
+
+    /** The current thread's recorder, created (and registered) on first use. */
+    static Recorder recorder() {
+        final ThreadLocal<Recorder> local = current;
+        Recorder recorder = local.get();
+        if (recorder == null) {
+            recorder = new Recorder();
+            local.set(recorder);
+            RECORDERS.add(recorder);
+        }
+        return recorder;
+    }
 
     static void beginAt(final int type, final int cls, final long now) {
-        if (type >= typeNanos.length) {
-            ensureTypes(type + 1);
-        }
-        typeClass[type] = (byte) cls;
-        currentType = type;
-        entityStart = now;
-        stamp = now;
-        depth = 0;
-        STACK[0] = BASE;
-        recording = true;
+        recorder().beginAt(type, cls, now);
     }
 
     static int enterAt(final int phase, final long now) {
-        charge(now);
-        if (depth + 1 >= STACK_CAPACITY) {
-            return OVERFLOW_TOKEN; // counted into the current top
-        }
-        final int token = depth;
-        STACK[++depth] = phase;
-        return token;
+        return recorder().enterAt(phase, now);
     }
 
     static void exitAt(final int token, final long now) {
-        charge(now);
-        if (token < depth) {
-            depth = token; // also pops frames whose exit an exception skipped
-        }
+        recorder().exitAt(token, now);
     }
 
     static void endAt(final boolean active, final long now) {
-        charge(now);
-        final int type = currentType;
-        typeNanos[type] += now - entityStart;
-        typeTicks[type]++;
-        if (!active) {
-            typeInactive[type]++;
-        }
-        recording = false;
-    }
-
-    private static void charge(final long now) {
-        typePhaseNanos[currentType][STACK[depth]] += now - stamp;
-        stamp = now;
+        recorder().endAt(active, now);
     }
 
     static void ensureTypes(final int size) {
-        if (size <= typeNanos.length) {
-            return;
-        }
-        final int old = typeNanos.length;
-        typeNanos = Arrays.copyOf(typeNanos, size);
-        typeTicks = Arrays.copyOf(typeTicks, size);
-        typeInactive = Arrays.copyOf(typeInactive, size);
-        typePhaseNanos = Arrays.copyOf(typePhaseNanos, size);
-        typeClass = Arrays.copyOf(typeClass, size);
-        for (int i = old; i < size; i++) {
-            typePhaseNanos[i] = new long[PHASE_COUNT];
-            typeClass[i] = -1;
-        }
+        recorder().ensureTypes(size);
     }
 
     /** Test only: forget everything. */
@@ -226,56 +212,85 @@ public final class EntityTickStats {
             users = 0;
         }
         enabled = false;
-        recording = false;
-        depth = 0;
-        Arrays.fill(LOOP_NANOS, 0L);
-        typeNanos = new long[0];
-        typeTicks = new long[0];
-        typeInactive = new long[0];
-        typePhaseNanos = new long[0][];
-        typeClass = new byte[0];
+        RECORDERS.clear();
+        current = new ThreadLocal<>();
         typeNames = null;
     }
 
     static void addLoopNanos(final int counter, final long nanos) {
-        LOOP_NANOS[counter] += nanos;
+        recorder().loopNanos[counter] += nanos;
     }
 
     static boolean recording() {
-        return recording;
+        final Recorder recorder = current.get();
+        return recorder != null && recorder.recording;
     }
 
     // ------------------------------------------------------------------------------------------
     // Reading
     // ------------------------------------------------------------------------------------------
 
-    /** A consistent copy of the counters. Main thread only. */
+    /**
+     * A copy of the counters, all threads' recorders summed. Any thread; meant to be taken on the server
+     * thread at a tick boundary (see the class comment on reading other threads' counters).
+     */
     public static Map<String, Object> snapshot() {
-        return snapshot(net.minecraft.server.MinecraftServer.currentTick, typeNames());
+        return snapshot(net.minecraft.server.MinecraftServer.currentTick, null);
     }
 
+    /** @param names entity type names by id, or null to look them up in the registry */
     static Map<String, Object> snapshot(final long tick, final String[] names) {
-        final int n = typeNanos.length;
-        final long[][] phases = new long[n][];
-        for (int i = 0; i < n; i++) {
-            phases[i] = typePhaseNanos[i].clone();
+        int n = 0;
+        for (final Recorder recorder : RECORDERS) {
+            n = Math.max(n, recorder.typeTicks.length);
         }
+        final long[] loop = new long[LOOP_NANOS_SIZE];
+        final long[] nanos = new long[n];
+        final long[] ticks = new long[n];
+        final long[] inactive = new long[n];
+        final long[][] phases = new long[n][PHASE_COUNT];
+        final byte[] classes = new byte[n];
+        Arrays.fill(classes, (byte) -1);
+        for (final Recorder recorder : RECORDERS) {
+            for (int c = 0; c < LOOP_NANOS_SIZE; c++) {
+                loop[c] += recorder.loopNanos[c];
+            }
+            // typeTicks is replaced last when a recorder grows: every array is at least that long.
+            final long[] rTicks = recorder.typeTicks;
+            final long[] rNanos = recorder.typeNanos;
+            final long[] rInactive = recorder.typeInactive;
+            final long[][] rPhases = recorder.typePhaseNanos;
+            final byte[] rClass = recorder.typeClass;
+            for (int i = 0; i < rTicks.length; i++) {
+                ticks[i] += rTicks[i];
+                nanos[i] += rNanos[i];
+                inactive[i] += rInactive[i];
+                final long[] p = rPhases[i];
+                for (int k = 0; k < PHASE_COUNT; k++) {
+                    phases[i][k] += p[k];
+                }
+                if (classes[i] < 0) {
+                    classes[i] = rClass[i];
+                }
+            }
+        }
+        final String[] typeNames = names != null ? names : typeNames(n);
         final Map<String, Object> out = new LinkedHashMap<>();
         out.put("tick", tick);
-        out.put("loopNanos", LOOP_NANOS.clone());
-        out.put("types", Arrays.copyOf(names == null ? new String[0] : names, n));
-        out.put("typeClass", typeClass.clone());
-        out.put("typeNanos", typeNanos.clone());
-        out.put("typeTicks", typeTicks.clone());
-        out.put("typeInactive", typeInactive.clone());
+        out.put("loopNanos", loop);
+        out.put("types", Arrays.copyOf(typeNames == null ? new String[0] : typeNames, n));
+        out.put("typeClass", classes);
+        out.put("typeNanos", nanos);
+        out.put("typeTicks", ticks);
+        out.put("typeInactive", inactive);
         out.put("typePhaseNanos", phases);
         return out;
     }
 
-    private static String[] typeNames() {
-        final int n = typeNanos.length;
-        if (typeNames != null && typeNames.length >= n) {
-            return typeNames;
+    private static String[] typeNames(final int n) {
+        final String[] known = typeNames;
+        if (known != null && known.length >= n) {
+            return known;
         }
         final String[] names = new String[n];
         for (int i = 0; i < n; i++) {
@@ -503,6 +518,95 @@ public final class EntityTickStats {
 
         private static byte[] bytes(final Object value) {
             return value instanceof byte[] b ? b : new byte[0];
+        }
+    }
+
+    private static final int LOOP_NANOS_SIZE = 3;
+
+    /**
+     * One thread's recording state and counters. Only its own thread writes it; {@link #snapshot} reads the
+     * counters from other threads (benign races, see the class comment). The array fields are volatile so a
+     * reader that sees a grown array also sees its copied contents.
+     */
+    static final class Recorder {
+        /** True between beginEntity and endEntity of an entity that is being recorded. */
+        boolean recording;
+        private int currentType;
+        private long entityStart;
+        private long stamp;
+        private final int[] stack = new int[STACK_CAPACITY];
+        private int depth; // index of the top of stack
+
+        final long[] loopNanos = new long[LOOP_NANOS_SIZE];
+        volatile long[] typeNanos = new long[0];
+        volatile long[] typeInactive = new long[0];
+        volatile long[][] typePhaseNanos = new long[0][];
+        volatile byte[] typeClass = new byte[0];
+        /** Replaced last when growing, so readers can bound every array by its length. */
+        volatile long[] typeTicks = new long[0];
+
+        void beginAt(final int type, final int cls, final long now) {
+            if (type >= this.typeTicks.length) {
+                this.ensureTypes(type + 1);
+            }
+            this.typeClass[type] = (byte) cls;
+            this.currentType = type;
+            this.entityStart = now;
+            this.stamp = now;
+            this.depth = 0;
+            this.stack[0] = BASE;
+            this.recording = true;
+        }
+
+        int enterAt(final int phase, final long now) {
+            this.charge(now);
+            if (this.depth + 1 >= STACK_CAPACITY) {
+                return OVERFLOW_TOKEN; // counted into the current top
+            }
+            final int token = this.depth;
+            this.stack[++this.depth] = phase;
+            return token;
+        }
+
+        void exitAt(final int token, final long now) {
+            this.charge(now);
+            if (token < this.depth) {
+                this.depth = token; // also pops frames whose exit an exception skipped
+            }
+        }
+
+        void endAt(final boolean active, final long now) {
+            this.charge(now);
+            final int type = this.currentType;
+            this.typeNanos[type] += now - this.entityStart;
+            this.typeTicks[type]++;
+            if (!active) {
+                this.typeInactive[type]++;
+            }
+            this.recording = false;
+        }
+
+        private void charge(final long now) {
+            this.typePhaseNanos[this.currentType][this.stack[this.depth]] += now - this.stamp;
+            this.stamp = now;
+        }
+
+        void ensureTypes(final int size) {
+            final int old = this.typeTicks.length;
+            if (size <= old) {
+                return;
+            }
+            this.typeNanos = Arrays.copyOf(this.typeNanos, size);
+            this.typeInactive = Arrays.copyOf(this.typeInactive, size);
+            final long[][] phases = Arrays.copyOf(this.typePhaseNanos, size);
+            final byte[] classes = Arrays.copyOf(this.typeClass, size);
+            for (int i = old; i < size; i++) {
+                phases[i] = new long[PHASE_COUNT];
+                classes[i] = -1;
+            }
+            this.typePhaseNanos = phases;
+            this.typeClass = classes;
+            this.typeTicks = Arrays.copyOf(this.typeTicks, size);
         }
     }
 }

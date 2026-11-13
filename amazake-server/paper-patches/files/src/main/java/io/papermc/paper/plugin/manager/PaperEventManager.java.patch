@@ -1,10 +1,12 @@
 --- a/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
 +++ b/src/main/java/io/papermc/paper/plugin/manager/PaperEventManager.java
-@@ -44,12 +_,14 @@
+@@ -44,12 +_,16 @@
  
          HandlerList handlers = event.getHandlers();
          RegisteredListener[] listeners = handlers.getRegisteredListeners();
 +        final boolean amazake$timed = !event.isAsynchronous() && ink.hoka.amazake.plugin.PluginTickStats.enabled(); // Amazake - plugin tick breakdown
++        final long amazake$lock = ink.hoka.amazake.threading.PluginLock.active() ? ink.hoka.amazake.threading.PluginLock.lockEvent(event, handlers, listeners) : ink.hoka.amazake.threading.PluginLock.NOT_LOCKED; // Amazake - plugin lock: the whole dispatch
++        try { // Amazake - plugin lock
  
          for (RegisteredListener registration : listeners) {
              if (!registration.getPlugin().isEnabled()) {
@@ -15,7 +17,7 @@
              try {
                  registration.callEvent(event);
              } catch (AuthorNagException ex) {
-@@ -71,7 +_,9 @@
+@@ -71,8 +_,13 @@
                  if (!(event instanceof ServerExceptionEvent)) { // We don't want to cause an endless event loop
                      this.callEvent(new ServerExceptionEvent(new ServerEventException(msg, ex, registration.getPlugin(), registration.getListener(), event)));
                  }
@@ -24,5 +26,9 @@
 +                ink.hoka.amazake.plugin.PluginTickStats.exit(amazake$token); // Amazake - plugin tick breakdown
 +            } // Amazake - plugin tick breakdown
          }
++        } finally { // Amazake - plugin lock
++            ink.hoka.amazake.threading.PluginLock.unlock(amazake$lock); // Amazake - plugin lock
++        } // Amazake - plugin lock
      }
  
+     public void registerEvents(@NotNull Listener listener, @NotNull Plugin plugin) {

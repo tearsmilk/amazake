@@ -153,4 +153,87 @@ class PluginTickStatsTest {
         assertTrue(plugins(summary).isEmpty());
         assertEquals(0.0, PluginTickStats.sample(from, to));
     }
+
+    @Test
+    void threadsRecordConcurrentlyAndSnapshotsSumExactly() throws Exception {
+        final int threads = 4;
+        final int calls = 50_000;
+        final java.util.concurrent.CyclicBarrier start = new java.util.concurrent.CyclicBarrier(threads);
+        final java.util.List<Throwable> errors = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        final Thread[] workers = new Thread[threads];
+        final org.bukkit.plugin.Plugin sharedPlugin = plugin("Shared");
+        for (int t = 0; t < threads; t++) {
+            final org.bukkit.plugin.Plugin ownPlugin = plugin("Plugin" + t);
+            workers[t] = new Thread(() -> {
+                try {
+                    start.await();
+                    // Slots are taken concurrently by name: every thread asks for "Shared" and its own plugin.
+                    final int shared = PluginTickStats.indexOf(sharedPlugin);
+                    final int mine = PluginTickStats.indexOf(ownPlugin);
+                    long now = 0L;
+                    for (int i = 0; i < calls; i++) {
+                        final int task = PluginTickStats.enterAt(mine, PluginTickStats.TASKS, now);           // 2 ns own
+                        final int event = PluginTickStats.enterAt(shared, PluginTickStats.EVENTS, now += 2); // 3 ns shared
+                        PluginTickStats.exitAt(event, now += 3);
+                        PluginTickStats.exitAt(task, now += 1);                                              // +1 ns own
+                        assertEquals(0, PluginTickStats.depth());
+                    }
+                    PluginTickStats.addLockWait(shared, 5L);
+                    PluginTickStats.addLockHeld(11L);
+                } catch (final Throwable e) {
+                    errors.add(e);
+                }
+            }, "plugin-recorder-" + t);
+            workers[t].start();
+        }
+        for (final Thread worker : workers) {
+            worker.join();
+        }
+        assertTrue(errors.isEmpty(), errors.toString());
+
+        final Map<String, Object> snap = PluginTickStats.snapshot(0L, 0L, true);
+        final String[] names = (String[]) snap.get("names");
+        assertEquals(threads + 1, names.length); // one slot per name, however many threads asked at once
+        final java.util.List<String> slots = java.util.Arrays.asList(names);
+        final int shared = slots.indexOf("Shared");
+        assertEquals(3L * calls * threads, nanos(snap, shared)[PluginTickStats.EVENTS]);
+        assertEquals((long) calls * threads, ((long[]) snap.get("calls"))[shared]);
+        assertEquals(5L * threads, ((long[]) snap.get("lockWaitNanos"))[shared]);
+        assertEquals(11L * threads, snap.get("lockHeldNanos"));
+        for (int t = 0; t < threads; t++) {
+            final int own = slots.indexOf("Plugin" + t);
+            assertEquals(3L * calls, nanos(snap, own)[PluginTickStats.TASKS]);
+            assertEquals((long) calls, ((long[]) snap.get("calls"))[own]);
+        }
+    }
+
+    @Test
+    void lockFieldsAppearWhenTheLockWasOn() {
+        final int a = PluginTickStats.register("A");
+        final int b = PluginTickStats.register("B");
+        final Map<String, Object> from = PluginTickStats.snapshot(0L, 0L, true);
+        PluginTickStats.exitAt(PluginTickStats.enterAt(a, PluginTickStats.EVENTS, 0L), 10 * MS);
+        PluginTickStats.addLockWait(b, 30 * MS); // B only waited
+        PluginTickStats.addLockHeld(20 * MS);
+        final Map<String, Object> to = PluginTickStats.snapshot(10L, SECOND, true);
+        final Map<String, Object> summary = PluginTickStats.summarize(from, to, 50);
+        assertEquals(2.0, summary.get("lockHeldMsPerTick"));
+        final List<Map<String, Object>> rows = plugins(summary);
+        assertEquals(2, rows.size());
+        assertEquals("A", rows.get(0).get("name"));
+        assertEquals(0.0, rows.get(0).get("lockWaitMsPerTick"));
+        assertEquals("B", rows.get(1).get("name"));
+        assertEquals(3.0, rows.get(1).get("lockWaitMsPerTick"));
+
+        // Lock off at both ends and no lock time: the optional fields are left out.
+        final Map<String, Object> off = PluginTickStats.summarize(PluginTickStats.snapshot(10L, SECOND, false),
+            PluginTickStats.snapshot(20L, 2 * SECOND, false), 50);
+        assertFalse(off.containsKey("lockHeldMsPerTick"));
+    }
+
+    private static org.bukkit.plugin.Plugin plugin(final String name) {
+        final org.bukkit.plugin.Plugin plugin = org.mockito.Mockito.mock(org.bukkit.plugin.Plugin.class);
+        org.mockito.Mockito.when(plugin.getName()).thenReturn(name);
+        return plugin;
+    }
 }

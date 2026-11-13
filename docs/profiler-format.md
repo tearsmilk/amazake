@@ -284,6 +284,11 @@ Off the main thread, `asyncCpuMsPerSecond` is the CPU time of the plugin's async
 | `plugins[].tasks`, `events`, `commands` | number | ms per tick of each kind |
 | `plugins[].callsPerTick` | number | Timed calls (tasks run + listener calls + commands) per tick |
 | `plugins[].asyncCpuMsPerSecond` | number | CPU ms per wall-clock second used by the plugin's async scheduler tasks (1000 = one core busy) |
+| `lockHeldMsPerTick` | number, *optional* | Time the plugin lock (`amazake.yml` `plugin-threading`) was held, all threads together, ms per tick: the part of plugin work that cannot run in parallel. Present only when the plugin lock was on during the measurement (older reports and reports with the lock off never have it) |
+| `plugins[].lockWaitMsPerTick` | number, *optional* | Time threads waited for the plugin lock before running this plugin's code, ms per tick (for an event: charged to the first listener's plugin that needs the lock). Present on every row exactly when `lockHeldMsPerTick` is |
+
+Main-thread and lock times are recorded on every tick thread (the server thread today; region threads once
+`multithreading` ticks in parallel), each thread on its own, and summed.
 
 ## Upload API (site)
 
