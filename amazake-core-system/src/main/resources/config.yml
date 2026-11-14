@@ -1,14 +1,117 @@
 # AmazakeCore. Каждый модуль включается здесь и настраивается в своей секции modules.<id>.
 # Применить изменения без рестарта сервера: /amazake system reload AmazakeCore  (или /amazakecore reload).
+# Тексты — MiniMessage: https://docs.advntr.dev/minimessage/format.html
 
 modules:
+  # Essentials: дома, варпы, запросы телепорта, смена режима игры, /invsee и /ec.
+  # Каждую подфичу можно включать/выключать на лету: /amazakecore reload.
   essentials:
     enabled: true
+    homes:
+      enabled: true
+      # Максимум домов на игрока. Право amazakecore.essentials.homes.unlimited снимает лимит.
+      max-homes: 3
+    warps:
+      enabled: true
+    tpa:
+      enabled: true
+      # Через сколько секунд истекает запрос телепорта.
+      timeout-seconds: 60
+    gamemode:
+      enabled: true
+    invsee:
+      enabled: true
+    enderchest:
+      enabled: true
+    # Тексты для игроков (MiniMessage). Плейсхолдеры: <home>, <warp>, <player>, <mode>, <max>, <seconds>, <count>, <homes>, <warps>.
+    messages:
+      player-only: "<red>Эта команда только для игроков."
+      player-not-found: "<red>Игрок <white><player></white> не в сети."
+      feature-disabled: "<red>Эта возможность сейчас отключена."
+      world-missing: "<red>Мир этой точки не загружен."
+      home-invalid-name: "<red>Недопустимое имя дома: только буквы, цифры, _ и - (до 32 символов)."
+      homes-limit: "<red>Достигнут лимит домов (<max>). Удалите лишний: /delhome <имя>."
+      home-set: "<green>Дом <white><home></white> сохранён."
+      home-deleted: "<yellow>Дом <white><home></white> удалён."
+      home-not-found: "<red>Дом <white><home></white> не найден."
+      home-teleport: "<green>Телепорт к дому <white><home></white>."
+      homes-empty: "<gray>У вас нет домов. Поставьте: /sethome [имя]."
+      homes-list: "<gold>Ваши дома (<count>): <white><homes></white>"
+      warp-invalid-name: "<red>Недопустимое имя варпа: только буквы, цифры, _ и - (до 32 символов)."
+      warp-set: "<green>Варп <white><warp></white> создан."
+      warp-deleted: "<yellow>Варп <white><warp></white> удалён."
+      warp-not-found: "<red>Варп <white><warp></white> не найден."
+      warp-teleport: "<green>Телепорт к варпу <white><warp></white>."
+      warps-empty: "<gray>Варпов пока нет."
+      warps-list: "<gold>Варпы (<count>): <white><warps></white>"
+      tpa-self: "<red>Нельзя отправить запрос телепорта самому себе."
+      tpa-sent: "<green>Запрос телепорта отправлен игроку <white><player></white> (истечёт через <seconds> с)."
+      tpahere-sent: "<green>Запрос «приди ко мне» отправлен игроку <white><player></white> (истечёт через <seconds> с)."
+      tpa-received: "<aqua><player></aqua> хочет телепортироваться к вам. <green>/tpaccept</green> или <red>/tpdeny</red>."
+      tpahere-received: "<aqua><player></aqua> просит вас телепортироваться к себе. <green>/tpaccept</green> или <red>/tpdeny</red>."
+      tpa-no-request: "<red>Нет активных запросов телепорта."
+      tpa-accepted-target: "<green>Вы приняли запрос от <white><player></white>."
+      tpa-accepted-requester: "<green><white><player></white> принял ваш запрос. Телепортирую…"
+      tpa-denied-target: "<yellow>Вы отклонили запрос от <white><player></white>."
+      tpa-denied-requester: "<red><white><player></white> отклонил ваш запрос телепорта."
+      tpa-cancelled: "<yellow>Ваш исходящий запрос телепорта отменён."
+      tpa-expired-requester: "<gray>Ваш запрос телепорта игроку <white><player></white> истёк."
+      gamemode-invalid: "<red>Режим игры: 0/s (выживание), 1/c (творческий), 2/a (приключение), 3/sp (наблюдатель)."
+      gamemode-set: "<green>Ваш режим игры: <white><mode></white>."
+      gamemode-set-other: "<green>Режим игры игрока <white><player></white>: <white><mode></white>."
+      gamemode-set-by: "<green>Ваш режим игры сменил <white><player></white>: <white><mode></white>."
+      no-permission: "<red>Недостаточно прав."
+      invsee-opened: "<green>Инвентарь игрока <white><player></white> открыт."
+      enderchest-opened: "<green>Ваш эндер-сундук открыт."
+      enderchest-opened-other: "<green>Эндер-сундук игрока <white><player></white> открыт."
+
+  # Модуль groups: собственные группы и права (без LuckPerms).
+  # Наследование групп, веса, префиксы/суффиксы. Публикует сервис групп для чата.
   groups:
     enabled: true
+    # Группа по умолчанию: в неё неявно входят все игроки. Создаётся при первом запуске (вес 0).
+    default-group: "default"
+    # Выдавать ли права онлайн-игрокам через PermissionAttachment (player.hasPermission).
+    # false — модуль только считает права внутри себя (GroupService.has), но не трогает Bukkit-права игрока.
+    apply-permissions: true
+
   holograms:
     enabled: true
+    # Движок по умолчанию для новых голограмм: text_display, armor_stand или item_display
+    default-engine: text_display
+    # Материал по умолчанию для движка item_display (имя Material из Bukkit)
+    default-item: DIAMOND
+    # Расстояние между строками для движка armor_stand, в блоках (0 < x <= 5)
+    line-spacing: 0.25
+
   npc:
+    # Скины игроков на NPC плагина Citizens.
+    # Включить/выключить модуль. Применить без рестарта: /amazakecore reload.
     enabled: true
+    # Модулю нужен плагин Citizens (мягкая зависимость через рефлексию).
+    # Если Citizens не установлен, модуль остаётся включённым, но бездействует,
+    # а в консоль выводится понятное предупреждение.
+    require-citizens: true
+
   chat:
+    # Модуль чата: оформление сообщений, каналы (глобал/локал), задержка и префиксы групп.
     enabled: true
+    # Режим чата по умолчанию: global (всем на сервере) или local (только рядом).
+    mode: global
+    local:
+      # Радиус локального чата в блоках (в одном мире). Виден отправитель и все в этом радиусе.
+      radius: 100
+    # Символ в начале сообщения, который в режиме local отправляет его в глобал (например "!всем привет").
+    global-prefix: "!"
+    # Символ, который в режиме global отправляет сообщение в локал. Пусто = выключено.
+    local-prefix: ""
+    # Задержка между сообщениями в секундах (0 = выключено). Право amazakecore.chat.cooldown.bypass снимает её.
+    cooldown-seconds: 0
+    # Оформление (MiniMessage). Теги: <prefix> <suffix> <group> <player> <world> <message>.
+    # <message> — это текст игрока как компонент (теги в нём не выполняются), поэтому он безопасен.
+    format:
+      global: "<prefix><white><player></white><suffix> <dark_gray>»</dark_gray> <gray><message></gray>"
+      local: "<gray>[</gray><green>Л</green><gray>]</gray> <prefix><white><player></white><suffix> <dark_gray>»</dark_gray> <gray><message></gray>"
+    # Сообщение при срабатывании задержки (MiniMessage). Доступен тег <seconds> — сколько секунд ещё ждать.
+    cooldown-message: "<red>Не так быстро! Подождите ещё <yellow><seconds></yellow> с.</red>"
+

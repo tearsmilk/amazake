@@ -1,0 +1,8 @@
+  holograms:
+    enabled: true
+    # Движок по умолчанию для новых голограмм: text_display, armor_stand или item_display
+    default-engine: text_display
+    # Материал по умолчанию для движка item_display (имя Material из Bukkit)
+    default-item: DIAMOND
+    # Расстояние между строками для движка armor_stand, в блоках (0 < x <= 5)
+    line-spacing: 0.25

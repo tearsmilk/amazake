@@ -1,0 +1,21 @@
+  chat:
+    # Модуль чата: оформление сообщений, каналы (глобал/локал), задержка и префиксы групп.
+    enabled: true
+    # Режим чата по умолчанию: global (всем на сервере) или local (только рядом).
+    mode: global
+    local:
+      # Радиус локального чата в блоках (в одном мире). Виден отправитель и все в этом радиусе.
+      radius: 100
+    # Символ в начале сообщения, который в режиме local отправляет его в глобал (например "!всем привет").
+    global-prefix: "!"
+    # Символ, который в режиме global отправляет сообщение в локал. Пусто = выключено.
+    local-prefix: ""
+    # Задержка между сообщениями в секундах (0 = выключено). Право amazakecore.chat.cooldown.bypass снимает её.
+    cooldown-seconds: 0
+    # Оформление (MiniMessage). Теги: <prefix> <suffix> <group> <player> <world> <message>.
+    # <message> — это текст игрока как компонент (теги в нём не выполняются), поэтому он безопасен.
+    format:
+      global: "<prefix><white><player></white><suffix> <dark_gray>»</dark_gray> <gray><message></gray>"
+      local: "<gray>[</gray><green>Л</green><gray>]</gray> <prefix><white><player></white><suffix> <dark_gray>»</dark_gray> <gray><message></gray>"
+    # Сообщение при срабатывании задержки (MiniMessage). Доступен тег <seconds> — сколько секунд ещё ждать.
+    cooldown-message: "<red>Не так быстро! Подождите ещё <yellow><seconds></yellow> с.</red>"

@@ -1,0 +1,9 @@
+  # Модуль groups: собственные группы и права (без LuckPerms).
+  # Наследование групп, веса, префиксы/суффиксы. Публикует сервис групп для чата.
+  groups:
+    enabled: true
+    # Группа по умолчанию: в неё неявно входят все игроки. Создаётся при первом запуске (вес 0).
+    default-group: "default"
+    # Выдавать ли права онлайн-игрокам через PermissionAttachment (player.hasPermission).
+    # false — модуль только считает права внутри себя (GroupService.has), но не трогает Bukkit-права игрока.
+    apply-permissions: true
