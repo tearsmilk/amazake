@@ -49,6 +49,8 @@ public final class HologramsModule implements Module, Listener {
 
     private ModuleContext context;
     private NamespacedKey nameKey;
+    /** Модуль активен: гасит асинхронные колбэки БД и регионные задачи после выключения. */
+    private volatile boolean enabled;
 
     /** Имя (ключ, нижний регистр) -> голограмма. Источник истины в памяти. */
     private final Map<String, Hologram> holograms = new ConcurrentHashMap<>();
@@ -86,6 +88,7 @@ public final class HologramsModule implements Module, Listener {
         context.registerListener(this);
         context.registerCommand(new HologramCommand(this));
 
+        this.enabled = true;
         loadAll();
     }
 
@@ -93,6 +96,7 @@ public final class HologramsModule implements Module, Listener {
     public void onDisable() {
         // Убираем всё, что ядро убрать не может: реальные сущности в мире. Планируем удаление в регионе каждой
         // голограммы; при остановке сервера сущности и так пропадут (мы их не сохраняем в чанк).
+        this.enabled = false;
         for (final Hologram h : holograms.values()) {
             despawn(h);
         }
@@ -161,6 +165,9 @@ public final class HologramsModule implements Module, Listener {
                     rs -> new String[] {rs.getString("name"), rs.getString("content")});
             })
             .thenAccept(lineRows -> {
+                if (!this.enabled) {
+                    return; // модуль успели выключить, пока грузились данные — ничего не спавним
+                }
                 final Map<String, List<String>> byName = new java.util.HashMap<>();
                 for (final String[] row : lineRows) {
                     byName.computeIfAbsent(row[0], k -> new ArrayList<>()).add(row[1]);
@@ -211,15 +218,11 @@ public final class HologramsModule implements Module, Listener {
     // ---- spawning (region threads) ----
 
     private void respawnAll() {
-        // Перебираем загруженные чанки в глобальном потоке, затем чистим осиротевшее и спавним в потоке региона.
-        Bukkit.getGlobalRegionScheduler().execute(context.plugin(), () -> {
-            for (final World world : Bukkit.getWorlds()) {
-                for (final Chunk chunk : world.getLoadedChunks()) {
-                    final Location at = chunkCenter(world, chunk);
-                    Bukkit.getRegionScheduler().execute(context.plugin(), at, () -> handleChunk(world, chunk));
-                }
-            }
-        });
+        // Каждую голограмму восстанавливаем в потоке её региона (чтение состояния чанка — тоже там).
+        // Голограммы в ещё не загруженных чанках появятся по ChunkLoadEvent (он приходит в потоке региона чанка).
+        for (final Hologram h : holograms.values()) {
+            respawn(h);
+        }
     }
 
     /** На потоке региона чанка: убрать осиротевшие наши сущности и заново создать голограммы этого чанка. */
@@ -246,12 +249,16 @@ public final class HologramsModule implements Module, Listener {
         }
         final int cx = (int) Math.floor(h.x()) >> 4;
         final int cz = (int) Math.floor(h.z()) >> 4;
-        if (!world.isChunkLoaded(cx, cz)) {
-            spawned.remove(h.name());
-            return;
-        }
         final Location loc = locationOf(h, world);
+        // Состояние чанка читаем на потоке региона этой локации, не на вызывающем потоке.
         Bukkit.getRegionScheduler().execute(context.plugin(), loc, () -> {
+            if (!this.enabled) {
+                return;
+            }
+            if (!world.isChunkLoaded(cx, cz)) {
+                spawned.remove(h.name());
+                return; // появится по ChunkLoadEvent, когда чанк загрузится
+            }
             removeOursIn(loc, h.name());
             doSpawn(h, loc);
         });
@@ -266,15 +273,20 @@ public final class HologramsModule implements Module, Listener {
         }
         final int cx = (int) Math.floor(h.x()) >> 4;
         final int cz = (int) Math.floor(h.z()) >> 4;
-        if (!world.isChunkLoaded(cx, cz)) {
-            return;
-        }
         final Location loc = locationOf(h, world);
-        Bukkit.getRegionScheduler().execute(context.plugin(), loc, () -> removeOursIn(loc, h.name()));
+        // Состояние чанка читаем на потоке региона локации.
+        Bukkit.getRegionScheduler().execute(context.plugin(), loc, () -> {
+            if (world.isChunkLoaded(cx, cz)) {
+                removeOursIn(loc, h.name());
+            }
+        });
     }
 
     /** Создаёт сущности голограммы. Должен выполняться в потоке региона локации. */
     private void doSpawn(final Hologram h, final Location loc) {
+        if (!this.enabled) {
+            return; // не создаём сущности после выключения модуля
+        }
         final Set<UUID> ids = ConcurrentHashMap.newKeySet();
         switch (h.engine()) {
             case TEXT_DISPLAY -> spawnText(loc, HologramText.joined(h.lines()), h.name(), ids);
@@ -354,7 +366,9 @@ public final class HologramsModule implements Module, Listener {
 
     @EventHandler
     public void onChunkLoad(final ChunkLoadEvent event) {
-        handleChunk(event.getWorld(), event.getChunk());
+        if (this.enabled) {
+            handleChunk(event.getWorld(), event.getChunk());
+        }
     }
 
     @EventHandler
@@ -385,9 +399,6 @@ public final class HologramsModule implements Module, Listener {
         return new Location(world, h.x(), h.y(), h.z());
     }
 
-    private static Location chunkCenter(final World world, final Chunk chunk) {
-        return new Location(world, (chunk.getX() << 4) + 8, world.getMinHeight() + 1, (chunk.getZ() << 4) + 8);
-    }
 
     private static boolean inChunk(final Hologram h, final World world, final Chunk chunk) {
         if (!h.world().equals(world.getName())) {

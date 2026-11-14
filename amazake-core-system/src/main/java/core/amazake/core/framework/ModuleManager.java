@@ -101,10 +101,14 @@ public final class ModuleManager {
         if (module == null || !this.running.containsKey(id)) {
             return false;
         }
+        final ModuleContext ctx = this.running.get(id);
         try {
             module.onDisable();
         } catch (final Throwable t) {
             this.system.logger().log(Level.WARNING, "AmazakeCore: ошибка при выключении модуля " + id, t);
+        }
+        if (ctx != null) {
+            ctx.cleanupServices();
         }
         this.running.remove(id);
         this.system.logger().info("AmazakeCore: модуль " + id + " выключен.");

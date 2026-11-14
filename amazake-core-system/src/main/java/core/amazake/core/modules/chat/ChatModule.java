@@ -11,13 +11,14 @@ import java.util.concurrent.atomic.AtomicReference;
 import net.kyori.adventure.audience.Audience;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
-import org.bukkit.Location;
-import org.bukkit.World;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.Bukkit;
 
 /**
  * Chat module: formats messages with group prefixes/suffixes, supports global and local channels, and throttles
@@ -37,6 +38,7 @@ public final class ChatModule implements Module, Listener {
 
     private final AtomicReference<ChatSettings> settings = new AtomicReference<>();
     private final Cooldown cooldown = new Cooldown(System::currentTimeMillis);
+    private final PositionTracker positions = new PositionTracker();
 
     private ModuleContext context;
 
@@ -55,6 +57,9 @@ public final class ChatModule implements Module, Listener {
         this.context = context;
         this.settings.set(ChatSettings.from(context.config()));
         context.registerListener(this);
+        for (final Player online : Bukkit.getOnlinePlayers()) {
+            this.startTracking(online);
+        }
     }
 
     @Override
@@ -65,6 +70,23 @@ public final class ChatModule implements Module, Listener {
     @Override
     public void onDisable() {
         this.cooldown.clearAll();
+        this.positions.clear();
+    }
+
+    @EventHandler
+    public void onJoin(final PlayerJoinEvent event) {
+        this.startTracking(event.getPlayer());
+    }
+
+    @EventHandler
+    public void onQuit(final PlayerQuitEvent event) {
+        this.positions.remove(event.getPlayer().getUniqueId());
+    }
+
+    /** Starts a per-player task that refreshes the player's position snapshot on the player's own thread. */
+    private void startTracking(final Player player) {
+        this.context.runOnceForPlayer(player, () -> this.positions.update(player));
+        this.context.system().runForPlayer(player, task -> this.positions.update(player), 10L);
     }
 
     // The event is async (its own thread). Per-player side effects go back through the player's thread.
@@ -125,27 +147,35 @@ public final class ChatModule implements Module, Listener {
         }
     }
 
-    /** Reads the sender's world name; reading entity state from the async event is a known Folia-era limitation. */
-    private static String worldName(final Player sender) {
-        final World world = sender.getWorld();
-        return world == null ? "" : world.getName();
+    /** The sender's world from the position snapshot (never touches a live entity off its thread). */
+    private String worldName(final Player sender) {
+        final PositionTracker.Pos pos = this.positions.get(sender.getUniqueId());
+        return pos == null ? "" : pos.world();
     }
 
-    private static void restrictToLocal(final AsyncChatEvent event, final Player sender, final double radiusSquared) {
-        final Location origin = sender.getLocation();
-        final World senderWorld = origin.getWorld();
+    /**
+     * Keeps only the sender, the console and players whose last position snapshot is within radius in the same world.
+     * Uses {@link PositionTracker} snapshots so the async handler never reads a live entity's position off its thread.
+     * If the sender has no snapshot yet (chatted within the first snapshot tick of joining), local is not restricted.
+     */
+    private void restrictToLocal(final AsyncChatEvent event, final Player sender, final double radiusSquared) {
+        final PositionTracker.Pos origin = this.positions.get(sender.getUniqueId());
+        if (origin == null) {
+            return; // no snapshot yet: do not silently drop everyone
+        }
         event.viewers().removeIf(audience -> {
             if (!(audience instanceof Player player)) {
                 return false; // keep console and any non-player audiences (e.g. for logging)
             }
-            if (player.getUniqueId().equals(sender.getUniqueId())) {
+            final UUID id = player.getUniqueId();
+            if (id.equals(sender.getUniqueId())) {
                 return false; // always keep the sender
             }
-            final World world = player.getWorld();
-            if (senderWorld == null || world == null || !world.equals(senderWorld)) {
+            final PositionTracker.Pos pos = this.positions.get(id);
+            if (pos == null || !pos.world().equals(origin.world())) {
                 return true;
             }
-            return player.getLocation().distanceSquared(origin) > radiusSquared;
+            return pos.distanceSquared(origin) > radiusSquared;
         });
     }
 

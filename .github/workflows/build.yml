@@ -86,10 +86,26 @@ jobs:
           unzip -l systems-template/build/libs/Example.azs
           unzip -p systems-template/build/libs/Example.azs system.yml
 
-      - name: Smoke test (start, commands, systems, /stress run 40 with the plugin, stop)
+      - name: Build AmazakeCore (obfuscated multi-module .azs)
+        run: |
+          api=$(ls amazake-server/build/libs/amazake-systems-api-*.jar | grep -v -- '-sources\.jar$')
+          ./gradlew -p amazake-core-system build -PamazakeApiJar="$GITHUB_WORKSPACE/$api" --stacktrace --no-daemon
+          azs=amazake-core-system/build/libs/AmazakeCore.azs
+          ls -l "$azs"
+          unzip -p "$azs" system.yml
+          # The entry class is kept; the bundled H2 driver is present; our module classes are obfuscated (renamed).
+          unzip -l "$azs" | grep -q 'core/amazake/core/AmazakeCoreSystem.class' || { echo "entry class missing"; exit 1; }
+          unzip -l "$azs" | grep -q 'org/h2/' || { echo "bundled H2 missing"; exit 1; }
+          if unzip -l "$azs" | grep -q 'core/amazake/core/modules/essentials/EssentialsModule.class'; then
+            echo "module classes are NOT obfuscated"; exit 1
+          fi
+          echo "AmazakeCore.azs: entry kept, H2 bundled, modules obfuscated"
+
+      - name: Smoke test (start, commands, systems, AmazakeCore, /stress run 40 with the plugin, stop)
         run: |
           scripts/smoke-test.sh amazake-server/build/libs/amazake-paperclip-*-mojmap.jar \
-            "$(ls stress-plugin/build/libs/AmazakeStress-*.jar)" systems-template/build/libs/Example.azs
+            "$(ls stress-plugin/build/libs/AmazakeStress-*.jar)" systems-template/build/libs/Example.azs \
+            amazake-core-system/build/libs/AmazakeCore.azs
 
       - uses: actions/upload-artifact@v4
         with:
@@ -108,6 +124,13 @@ jobs:
         with:
           name: amazake-stress-${{ github.run_number }}
           path: stress-plugin/build/libs/AmazakeStress-*.jar
+          if-no-files-found: error
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amazake-core-${{ github.run_number }}
+          path: amazake-core-system/build/libs/AmazakeCore.azs
           if-no-files-found: error
           retention-days: 30
 
@@ -131,8 +154,10 @@ jobs:
           cp "$api" amazake-systems-api.jar
           # The template for writing a system, ready to unpack and build.
           (git archive --format=zip --prefix=amazake-system-template/ HEAD:systems-template > amazake-system-template.zip)
+          # AmazakeCore: the obfuscated multi-module system (drop into systems/, /amazake system enable AmazakeCore).
+          cp amazake-core-system/build/libs/AmazakeCore.azs .
           gh release create "build-${{ github.run_number }}" "$name" "$(basename "$stress")" "$api" "$api_sources" \
-            amazake-systems-api.jar amazake-system-template.zip \
+            amazake-systems-api.jar amazake-system-template.zip AmazakeCore.azs \
             --target "$GITHUB_SHA" \
             --title "Amazake 1.21.11 #${{ github.run_number }}" \
             --notes "Built from ${GITHUB_SHA::7}: $(git log -1 --format=%s)" \

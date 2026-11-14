@@ -7,7 +7,8 @@
 # exception may come from the plugin, and the plugin's profiler report must reach the local site.
 # With a third argument, a system .azs built from systems-template/ (system "Example") is put into systems/ before
 # the start, enabled, its /example command run, and restarted from a rebuilt file with /amazake system restart.
-#   scripts/smoke-test.sh path/to/amazake-paperclip.jar [path/to/AmazakeStress.jar [path/to/Example.azs]]
+#   scripts/smoke-test.sh path/to/amazake-paperclip.jar [AmazakeStress.jar [Example.azs [AmazakeCore.azs]]]
+# A fourth argument (the obfuscated AmazakeCore.azs) is enabled at runtime and its modules are checked.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 jar=$(realpath "$1")
@@ -16,8 +17,12 @@ if [ $# -ge 2 ] && [ -n "$2" ]; then
   stress_jar=$(realpath "$2")
 fi
 example_azs=""
-if [ $# -ge 3 ]; then
+if [ $# -ge 3 ] && [ -n "$3" ]; then
   example_azs=$(realpath "$3")
+fi
+core_azs=""
+if [ $# -ge 4 ] && [ -n "$4" ]; then
+  core_azs=$(realpath "$4")
 fi
 dir=$(mktemp -d)
 site_port=18787
@@ -42,6 +47,9 @@ mkdir -p systems
 printf 'enabled:\n  - Ghost\n' > systems/systems.yml
 if [ -n "$example_azs" ]; then
   cp "$example_azs" systems/Example.azs
+fi
+if [ -n "$core_azs" ]; then
+  cp "$core_azs" systems/AmazakeCore.azs
 fi
 mkfifo input
 # Keep the fifo open for writing so the server never sees end-of-input.
@@ -105,6 +113,18 @@ if [ -n "$example_azs" ]; then
   send "example"
   cp "$tmp_azs/Example-good.azs" systems/.Example.azs.upload
   mv -f systems/.Example.azs.upload systems/Example.azs
+fi
+
+core_from=0
+if [ -n "$core_azs" ]; then
+  core_from=$(wc -l < server.log)
+  send "amazake system enable AmazakeCore" 6
+  send "amazakecore modules"
+  send "group create smoketest"
+  send "group setprefix smoketest <red>[S] "
+  send "amazakecore reload" 4
+  send "amazake system disable AmazakeCore" 4
+  send "amazake system enable AmazakeCore" 6
 fi
 
 stress_from=0
@@ -192,7 +212,7 @@ echo "---- /reload ----"
 tail -n "+$((reload_from + 1))" server.log > reload.log
 reload_check() { if grep -qE "$1" reload.log; then echo "ok: $2"; else echo "MISSING: $2"; fail=1; fi; }
 # disabled -> found again -> enabled again, in this order, before the stop.
-if awk '/Системы: система AmazakeTab выключена\./ && !d {d=NR} /Системы: найдено [0-9]+, включены: AmazakeTab/ && d && !s {s=NR}
+if awk '/Системы: система AmazakeTab выключена\./ && !d {d=NR} /Системы: найдено [0-9]+, включены:.*AmazakeTab/ && d && !s {s=NR}
         END {exit !(d && s)}' reload.log; then
   echo "ok: /reload disables AmazakeTab, then enables it again from systems.yml"
 else
@@ -214,6 +234,28 @@ if [ -n "$example_azs" ]; then
     echo "MISSING: /example after the refused restart"; fail=1
   fi
 fi
+# ---- AmazakeCore (obfuscated multi-module system), if provided ----
+if [ -n "$core_azs" ]; then
+  echo "---- AmazakeCore ----"
+  core_log=core-amazakecore.log
+  tail -n "+$((core_from + 1))" server.log > "$core_log"
+  cc() { if grep -qE "$1" "$core_log"; then echo "ok: $2"; else echo "MISSING: $2"; fail=1; fi; }
+  cc 'AmazakeCore запущен\. Модули: essentials, groups, holograms, npc, chat' "AmazakeCore enables all five modules"
+  for m in essentials groups holograms npc chat; do
+    cc "модуль $m включ" "module $m enabled"
+  done
+  cc 'Модулю npc нужен плагин Citizens' "npc degrades gracefully without Citizens"
+  cc 'Группа .*smoketest.* создана' "groups command works through obfuscation"
+  cc 'AmazakeCore: настройки перечитаны' "/amazakecore reload (hot config reload) works"
+  cc 'система AmazakeCore выключена' "AmazakeCore disables cleanly"
+  if [ -f systems/AmazakeCore/amazakecore.mv.db ]; then echo "ok: AmazakeCore H2 database created"; else echo "MISSING: AmazakeCore database"; fail=1; fi
+  if grep -nE 'Exception|SEVERE' "$core_log" | grep -qiE 'amazakecore|core\.amazake\.core'; then
+    echo "FOUND: an exception from AmazakeCore"; grep -nE 'Exception|SEVERE' "$core_log" | grep -iE 'amazakecore|core\.amazake\.core' | head; fail=1
+  else
+    echo "ok: no exception from AmazakeCore"
+  fi
+fi
+
 if grep -nE 'at core\.amazake\.systems|Не удалось включить систему|ошибка при (выключении|перезагрузке) системы' server.log; then
   echo "FOUND: an exception or error from AmazakeSystems"; fail=1
 else

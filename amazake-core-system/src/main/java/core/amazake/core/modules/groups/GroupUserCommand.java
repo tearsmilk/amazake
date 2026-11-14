@@ -7,6 +7,7 @@ import java.util.Locale;
 import java.util.UUID;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
+import org.bukkit.entity.Player;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 
@@ -34,9 +35,27 @@ public final class GroupUserCommand extends Command {
             return true;
         }
         final String playerName = args[0];
-        @SuppressWarnings("deprecation")
-        final OfflinePlayer target = Bukkit.getOfflinePlayer(playerName);
-        final UUID id = target.getUniqueId();
+        final Player online = Bukkit.getPlayerExact(playerName);
+        if (online != null) {
+            dispatch(sender, args, online.getUniqueId(), online.getName());
+            return true;
+        }
+        // Оффлайн-игрок: разрешение имени в UUID может лезть в сеть — делаем это вне тик-потока.
+        sender.sendMessage(Text.parse("<gray>Ищу игрока <white>" + Text.escape(playerName) + "</white>…"));
+        Bukkit.getAsyncScheduler().runNow(this.engine.plugin(), task -> {
+            @SuppressWarnings("deprecation")
+            final OfflinePlayer target = Bukkit.getOfflinePlayer(playerName);
+            if (!target.hasPlayedBefore() && !target.isOnline()) {
+                sender.sendMessage(Text.parse("<red>Игрок <white>" + Text.escape(playerName) + "</white> не найден."));
+                return;
+            }
+            final String resolved = target.getName() != null ? target.getName() : playerName;
+            dispatch(sender, args, target.getUniqueId(), resolved);
+        });
+        return true;
+    }
+
+    private void dispatch(final CommandSender sender, final String[] args, final UUID id, final String playerName) {
         final String section = args[1].toLowerCase(Locale.ROOT);
         switch (section) {
             case "group" -> group(sender, args, id, playerName);
@@ -44,7 +63,6 @@ public final class GroupUserCommand extends Command {
             case "info" -> info(sender, id, playerName);
             default -> sender.sendMessage(Text.parse("<red>group, perm или info."));
         }
-        return true;
     }
 
     private void group(final CommandSender sender, final String[] args, final UUID id, final String name) {

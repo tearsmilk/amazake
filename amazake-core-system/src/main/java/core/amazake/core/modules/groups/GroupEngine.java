@@ -14,6 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
+import org.bukkit.permissions.Permission;
 import org.bukkit.permissions.PermissionAttachment;
 
 /**
@@ -210,6 +211,11 @@ public final class GroupEngine implements GroupService {
         return GroupLogic.matches(computeEffective(player), GroupLogic.norm(permission));
     }
 
+    /** The owning plugin (for scheduling); used by commands that resolve offline players off-thread. */
+    public org.bukkit.plugin.Plugin plugin() {
+        return this.context.plugin();
+    }
+
     // ------------------------------------------------------------------ permission attachments
 
     /** Выдаёт игроку привязку с его правами. Вызывать на потоке игрока. */
@@ -227,8 +233,26 @@ public final class GroupEngine implements GroupService {
             }
         }
         final PermissionAttachment att = player.addAttachment(this.context.plugin());
-        for (final String perm : computeEffective(id)) {
+        final Set<String> effective = computeEffective(id);
+        for (final String perm : effective) {
             att.setPermission(perm, true);
+        }
+        // Раскрываем wildcard-права (* и a.b.*) по зарегистрированным на сервере правам, чтобы Bukkit-проверка
+        // sender.hasPermission(...) совпадала с GroupService.has(...). (Нода без зарегистрированного Permission
+        // раскрыта быть не может — это общее поведение систем прав.)
+        final boolean all = effective.contains("*");
+        for (final Permission registered : Bukkit.getPluginManager().getPermissions()) {
+            final String name = registered.getName().toLowerCase(java.util.Locale.ROOT);
+            if (all) {
+                att.setPermission(registered.getName(), true);
+                continue;
+            }
+            for (final String perm : effective) {
+                if (perm.endsWith(".*") && name.startsWith(perm.substring(0, perm.length() - 1))) {
+                    att.setPermission(registered.getName(), true);
+                    break;
+                }
+            }
         }
         this.attachments.put(id, att);
         player.recalculatePermissions();

@@ -22,7 +22,7 @@ public final class ModuleContext {
     private final String moduleId;
     private final SystemContext system;
     private final Database database;
-    private final CoreServices services;
+    private final ModuleServices services;
     private final Logger logger;
     private volatile ConfigurationSection config;
 
@@ -31,7 +31,7 @@ public final class ModuleContext {
         this.moduleId = moduleId;
         this.system = system;
         this.database = database;
-        this.services = services;
+        this.services = new ModuleServices(services);
         this.config = config;
         this.logger = Logger.getLogger("AmazakeCore/" + moduleId);
         this.logger.setParent(system.logger());
@@ -51,8 +51,13 @@ public final class ModuleContext {
         return this.database;
     }
 
-    public CoreServices services() {
+    public ModuleServices services() {
         return this.services;
+    }
+
+    /** Removes services this module published; called by the core when the module is disabled. */
+    void cleanupServices() {
+        this.services.removeAll();
     }
 
     /** The module's config section ({@code modules.<id>}); replaced on config reload before onConfigReload runs. */
