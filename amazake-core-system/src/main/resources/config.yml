@@ -1,0 +1,14 @@
+# AmazakeCore. Каждый модуль включается здесь и настраивается в своей секции modules.<id>.
+# Применить изменения без рестарта сервера: /amazake system reload AmazakeCore  (или /amazakecore reload).
+
+modules:
+  essentials:
+    enabled: true
+  groups:
+    enabled: true
+  holograms:
+    enabled: true
+  npc:
+    enabled: true
+  chat:
+    enabled: true

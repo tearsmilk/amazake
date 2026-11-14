@@ -1,0 +1,7 @@
+# AmazakeCore — набор модулей ядра. ${name}/${version} подставляет сборка.
+name: ${name}
+version: ${version}
+main: core.amazake.core.AmazakeCoreSystem
+description: "Набор модулей: essentials, голограммы, NPC, группы/права, чат. Настройка в config.yml, перезагрузка без рестарта."
+authors: [tearsmilk]
+api-version: 2
