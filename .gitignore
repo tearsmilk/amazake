@@ -25,3 +25,6 @@ run
 # Python
 __pycache__/
 *.pyc
+
+# Workflow agent worktrees (transient)
+.claude/
