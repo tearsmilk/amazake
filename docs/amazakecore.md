@@ -61,12 +61,6 @@ AmazakeCore — это система Amazake (файл `.azs`), которая 
 - `/hologram create|delete|list|near|addline|setline|removeline|lines|movehere|tp|setengine|setitem|reload` —
   право `amazakecore.holograms.admin`. Строки — MiniMessage. Голограммы сохраняются и восстанавливаются при запуске.
 
-### npc — скины на NPC (Citizens)
-Ставит игроков-скины на NPC плагина **Citizens** (подключение через рефлексию — жёсткой зависимости нет). Если
-Citizens не установлен, модуль остаётся включённым, но бездействует и пишет об этом в консоль.
-- `/npccore skin <игрок>` — скин выбранного NPC; `/npccore skin id <id> <игрок>` — по номеру NPC. Право
-  `amazakecore.npc.admin`.
-
 ### chat — оформление чата
 - Каналы **global** и **local** (радиус `local.radius`), формат — MiniMessage с тегами `<prefix> <suffix>
   <player> <group> <message> <world>`. Префикс/суффикс берутся из модуля groups, если он включён.

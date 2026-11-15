@@ -3,7 +3,7 @@ package core.amazake.core.framework;
 import org.bukkit.configuration.ConfigurationSection;
 
 /**
- * One feature module of AmazakeCore (essentials, holograms, npc, groups, chat). A module is turned on and off in
+ * One feature module of AmazakeCore (essentials, holograms, groups, chat). A module is turned on and off in
  * config.yml under {@code modules.<id>} and can be reloaded without a server restart.
  *
  * <p>Lifecycle, all on the global tick thread:</p>

@@ -240,11 +240,10 @@ if [ -n "$core_azs" ]; then
   core_log=core-amazakecore.log
   tail -n "+$((core_from + 1))" server.log > "$core_log"
   cc() { if grep -qE "$1" "$core_log"; then echo "ok: $2"; else echo "MISSING: $2"; fail=1; fi; }
-  cc 'AmazakeCore запущен\. Модули: essentials, groups, holograms, npc, chat' "AmazakeCore enables all five modules"
-  for m in essentials groups holograms npc chat; do
+  cc 'AmazakeCore запущен\. Модули: essentials, groups, holograms, chat' "AmazakeCore enables all four modules"
+  for m in essentials groups holograms chat; do
     cc "модуль $m включ" "module $m enabled"
   done
-  cc 'Модулю npc нужен плагин Citizens' "npc degrades gracefully without Citizens"
   cc 'Группа .*smoketest.* создана' "groups command works through obfuscation"
   cc 'AmazakeCore: настройки перечитаны' "/amazakecore reload (hot config reload) works"
   cc 'система AmazakeCore выключена' "AmazakeCore disables cleanly"

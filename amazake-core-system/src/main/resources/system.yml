@@ -2,6 +2,6 @@
 name: ${name}
 version: ${version}
 main: core.amazake.core.AmazakeCoreSystem
-description: "Набор модулей: essentials, голограммы, NPC, группы/права, чат. Настройка в config.yml, перезагрузка без рестарта."
+description: "Набор модулей: essentials, голограммы, группы/права, чат. Настройка в config.yml, перезагрузка без рестарта."
 authors: [tearsmilk]
 api-version: 2
