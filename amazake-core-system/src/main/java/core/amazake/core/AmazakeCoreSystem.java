@@ -8,7 +8,6 @@ import core.amazake.core.modules.chat.ChatModule;
 import core.amazake.core.modules.essentials.EssentialsModule;
 import core.amazake.core.modules.groups.GroupsModule;
 import core.amazake.core.modules.holograms.HologramsModule;
-import core.amazake.core.modules.npc.NpcModule;
 import core.amazake.systems.api.AmazakeSystem;
 import core.amazake.systems.api.SystemContext;
 import java.util.List;
@@ -16,7 +15,7 @@ import java.util.logging.Level;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 /**
- * AmazakeCore: one Amazake system that bundles several feature modules (essentials, holograms, npc, groups, chat),
+ * AmazakeCore: one Amazake system that bundles several feature modules (essentials, holograms, groups, chat),
  * each switched on/off and configured under {@code modules.<id>} in config.yml, and reloadable without a server
  * restart. The entry point named in system.yml; its name must survive obfuscation (see proguard-rules.pro).
  */
@@ -33,7 +32,6 @@ public final class AmazakeCoreSystem implements AmazakeSystem {
             new EssentialsModule(),
             new GroupsModule(),
             new HologramsModule(),
-            new NpcModule(),
             new ChatModule());
     }
 
